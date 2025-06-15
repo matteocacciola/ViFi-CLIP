@@ -15,7 +15,7 @@ from utils.logger import create_logger
 import time
 import numpy as np
 import random
-from apex import amp
+from torch.amp import GradScaler, autocast
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from datasets.blending import CutmixMixupBlending
 from utils.config import get_config
@@ -40,6 +40,9 @@ def parse_option():
 
     parser.add_argument("--local_rank", type=int, default=-1, help='local rank for DistributedDataParallel')
     args = parser.parse_args()
+
+    if args.local_rank == -1:
+        args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
     config = get_config(args)
 
@@ -72,8 +75,6 @@ def main(config):
 
     optimizer = build_optimizer(config, model)
     lr_scheduler = build_scheduler(config, optimizer, len(train_loader))
-    if config.TRAIN.OPT_LEVEL != 'O0':
-        model, optimizer = amp.initialize(models=model, optimizers=optimizer, opt_level=config.TRAIN.OPT_LEVEL)
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[config.LOCAL_RANK], broadcast_buffers=False,
                                                       find_unused_parameters=False)
@@ -139,6 +140,7 @@ def train_one_epoch(epoch, model, criterion, optimizer, lr_scheduler, train_load
     start = time.time()
     end = time.time()
 
+    scaler = GradScaler('cuda', enabled=(config.TRAIN.OPT_LEVEL != 'O0'))
 
     for idx, batch_data in enumerate(train_loader):
 
@@ -150,25 +152,19 @@ def train_one_epoch(epoch, model, criterion, optimizer, lr_scheduler, train_load
         if mixup_fn is not None:
             images, label_id = mixup_fn(images, label_id)
 
-        output = model(images)
+        with autocast('cuda', enabled=(config.TRAIN.OPT_LEVEL != 'O0')):
+            output = model(images)
 
-        total_loss = criterion(output, label_id)
-        total_loss = total_loss / config.TRAIN.ACCUMULATION_STEPS
+            total_loss = criterion(output, label_id) / config.TRAIN.ACCUMULATION_STEPS
 
-        if config.TRAIN.ACCUMULATION_STEPS == 1:
+        scaler.scale(total_loss).backward()
+
+        if config.TRAIN.ACCUMULATION_STEPS == 1 or (
+                config.TRAIN.ACCUMULATION_STEPS > 1 and (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0
+        ):
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
-        if config.TRAIN.OPT_LEVEL != 'O0':
-            with amp.scale_loss(total_loss, optimizer) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            total_loss.backward()
-        if config.TRAIN.ACCUMULATION_STEPS > 1:
-            if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
-                optimizer.step()
-                optimizer.zero_grad()
-                lr_scheduler.step_update(epoch * num_steps + idx)
-        else:
-            optimizer.step()
             lr_scheduler.step_update(epoch * num_steps + idx)
 
         torch.cuda.synchronize()
@@ -200,8 +196,7 @@ def validate(val_loader, model, config):
         logger.info(f"{config.TEST.NUM_CLIP * config.TEST.NUM_CROP} views inference")
         for idx, batch_data in enumerate(val_loader):
             _image = batch_data["imgs"]
-            label_id = batch_data["label"]
-            label_id = label_id.reshape(-1)
+            label_id = batch_data["label"].reshape(-1)
 
             b, tn, c, h, w = _image.size()
             t = config.DATA.NUM_FRAMES
@@ -221,6 +216,11 @@ def validate(val_loader, model, config):
 
                 similarity = output.view(b, -1).softmax(dim=-1)
                 tot_similarity += similarity
+
+                # with autocast('cuda', enabled=config.TRAIN.OPT_LEVEL != 'O0'):
+                #     output = model(image_input)
+                #     similarity = output.view(b, -1).softmax(dim=-1)
+                #     tot_similarity += similarity
 
             values_1, indices_1 = tot_similarity.topk(1, dim=-1)
             values_5, indices_5 = tot_similarity.topk(5, dim=-1)
@@ -257,8 +257,8 @@ if __name__ == '__main__':
         rank = -1
         world_size = -1
     torch.cuda.set_device(args.local_rank)
-    torch.distributed.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
-    torch.distributed.barrier(device_ids=[args.local_rank])
+    dist.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
+    dist.barrier(device_ids=[args.local_rank])
 
     seed = config.SEED + dist.get_rank()
     torch.manual_seed(seed)
