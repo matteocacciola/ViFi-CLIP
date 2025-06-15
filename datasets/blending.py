@@ -1,7 +1,6 @@
 from abc import ABCMeta, abstractmethod
 
 import torch
-import torch.nn.functional as F
 from torch.distributions.beta import Beta
 import numpy as np
 
