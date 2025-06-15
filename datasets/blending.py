@@ -50,10 +50,11 @@ class BaseMiniBatchBlending(metaclass=ABCMeta):
                 the shape of (B, 1, num_classes) and all elements are in range
                 [0, 1].
         """
-        one_hot_label = one_hot(label, num_classes=self.num_classes, on_value=self.on_value, off_value=self.off_value, device=label.device)
+        one_hot_label = one_hot(
+            label, num_classes=self.num_classes, on_value=self.on_value, off_value=self.off_value, device=label.device
+        )
 
-        mixed_imgs, mixed_label = self.do_blending(imgs, one_hot_label,
-                                                   **kwargs)
+        mixed_imgs, mixed_label = self.do_blending(imgs, one_hot_label, **kwargs)
 
         return mixed_imgs, mixed_label
 
@@ -131,10 +132,8 @@ class CutmixBlending(BaseMiniBatchBlending):
         lam = self.beta.sample()
 
         bbx1, bby1, bbx2, bby2 = self.rand_bbox(imgs.size(), lam)
-        imgs[:, ..., bby1:bby2, bbx1:bbx2] = imgs[rand_index, ..., bby1:bby2,
-                                                  bbx1:bbx2]
-        lam = 1 - (1.0 * (bbx2 - bbx1) * (bby2 - bby1) /
-                   (imgs.size()[-1] * imgs.size()[-2]))
+        imgs[:, ..., bby1:bby2, bbx1:bbx2] = imgs[rand_index, ..., bby1:bby2, bbx1:bbx2]
+        lam = 1 - (1.0 * (bbx2 - bbx1) * (bby2 - bby1) / (imgs.size()[-1] * imgs.size()[-2]))
 
         label = lam * label + (1 - lam) * label[rand_index, :]
 
@@ -182,10 +181,8 @@ class CutmixMixupBlending(BaseMiniBatchBlending):
         lam = self.cutmix_beta.sample()
 
         bbx1, bby1, bbx2, bby2 = self.rand_bbox(imgs.size(), lam)
-        imgs[:, ..., bby1:bby2, bbx1:bbx2] = imgs[rand_index, ..., bby1:bby2,
-                                                  bbx1:bbx2]
-        lam = 1 - (1.0 * (bbx2 - bbx1) * (bby2 - bby1) /
-                   (imgs.size()[-1] * imgs.size()[-2]))
+        imgs[:, ..., bby1:bby2, bbx1:bbx2] = imgs[rand_index, ..., bby1:bby2, bbx1:bbx2]
+        lam = 1 - (1.0 * (bbx2 - bbx1) * (bby2 - bby1) / (imgs.size()[-1] * imgs.size()[-2]))
 
         label = lam * label + (1 - lam) * label[rand_index, :]
         return imgs, label

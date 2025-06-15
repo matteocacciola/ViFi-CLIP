@@ -7,9 +7,8 @@ import argparse
 import datetime
 import shutil
 from pathlib import Path
-from utils.config import get_config
 from utils.optimizer import build_optimizer, build_scheduler
-from utils.tools import AverageMeter, reduce_tensor, epoch_saving, load_checkpoint, generate_text, auto_resume_helper
+from utils.tools import AverageMeter, epoch_saving, load_checkpoint, auto_resume_helper
 from datasets.build import build_dataloader
 from utils.logger import create_logger
 import time
@@ -23,8 +22,7 @@ from trainers import vificlip
 import mlflow
 import mlflow.pytorch
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix, ConfusionMatrixDisplay
-import matplotlib.pyplot as plt
-import tempfile
+import cv2
 
 
 def parse_option():
@@ -38,6 +36,7 @@ def parse_option():
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--accumulation-steps', type=int)
     parser.add_argument('--local_rank', type=int, default=-1, help='local rank for DistributedDataParallel')
+    parser.add_argument('--validate-videos', action='store_true')
     args = parser.parse_args()
 
     if args.local_rank == -1:
@@ -245,9 +244,36 @@ def validate(val_loader, model, config, return_preds=False):
     return acc1_final
 
 
+def validate_videos(dataset_path):
+    corrupted_files = []
+    for root, dirs, files in os.walk(dataset_path):
+        for file in files:
+            if not file.endswith(('.mp4', '.avi', '.mov')):
+                continue
+
+            video_path = os.path.join(root, file)
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                corrupted_files.append(video_path)
+            cap.release()
+    return corrupted_files
+
+
 if __name__ == '__main__':
     # prepare config
     args, config = parse_option()
+
+    if args.validate_videos:
+        logger = create_logger(output_dir=config.OUTPUT, dist_rank=0, name=f"{config.MODEL.ARCH}")
+        logger.info(f"Validating video files in {config.DATA.ROOT}")
+        corrupted_files = validate_videos(config.DATA.ROOT)
+        if corrupted_files:
+            logger.error("Corrupted video files found:")
+            for file in corrupted_files:
+                logger.error(file)
+        else:
+            logger.info("No corrupted video files found.")
+        exit(0)
 
     # init_distributed
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:

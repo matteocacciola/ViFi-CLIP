@@ -1,6 +1,8 @@
+# DISCLAIMER
+
+This version removes APEX dependency and uses PyTorch native AMP for training.
+
 # Fine-tuned CLIP models are efficient video learners [CVPR 2023]
-
-
 
 > [**Fine-tuned CLIP models are efficient video learners**](https://arxiv.org/abs/2212.03640)<br>
 > [Hanoona Rasheed*](https://scholar.google.com/citations?user=yhDdEuEAAAAJ&hl=en&authuser=1&oi=sra), [Muhammad Uzair Khattak*](https://scholar.google.com/citations?user=M6fFL4gAAAAJ&hl=en&authuser=1), [Muhammad Maaz](https://scholar.google.com/citations?user=vTy9Te8AAAAJ&hl=en&authuser=1&oi=sra), [Salman Khan](https://salman-h-khan.github.io/), [Fahad Shahbaz Khan](https://scholar.google.es/citations?user=zvaeYnUAAAAJ&hl=en)

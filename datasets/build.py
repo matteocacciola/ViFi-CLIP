@@ -36,19 +36,21 @@ img_norm_cfg = dict(
 
 
 class BaseDataset(Dataset, metaclass=ABCMeta):
-    def __init__(self,
-                 ann_file,
-                 pipeline,
-                 repeat = 1,
-                 data_prefix=None,
-                 test_mode=False,
-                 multi_class=False,
-                 num_classes=None,
-                 start_index=1,
-                 modality='RGB',
-                 sample_by_class=False,
-                 power=0,
-                 dynamic_length=False,):
+    def __init__(
+        self,
+        ann_file,
+        pipeline,
+        repeat = 1,
+        data_prefix=None,
+        test_mode=False,
+        multi_class=False,
+        num_classes=None,
+        start_index=1,
+        modality='RGB',
+        sample_by_class=False,
+        power=0,
+        dynamic_length=False,
+    ):
         super().__init__()
         self.use_tar_format = True if ".tar" in data_prefix else False
         data_prefix = data_prefix.replace(".tar", "")
