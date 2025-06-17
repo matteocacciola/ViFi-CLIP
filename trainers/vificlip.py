@@ -53,7 +53,9 @@ class TextEncoder(nn.Module):
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+        #x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)].to(self.text_projection.dtype) @ self.text_projection
+
 
         return x
 
@@ -181,7 +183,11 @@ class ViFiCLIP(nn.Module):
         # Remove the batch dimensions
         image = image.reshape(-1, c, h, w)
         # Now pass the image into CLIP visual encoder
-        image_features = self.image_encoder(image.type(self.dtype))
+        #image_features = self.image_encoder(image.type(self.dtype))
+        image = image.to(dtype=self.image_encoder.conv1.weight.dtype)
+        image_features = self.image_encoder(image)
+
+
         # Now again attach the batch dimensions
         image_features = image_features.view(b, t, -1)  # [B, T, 512]
         # Now take the mean along the temporal direction

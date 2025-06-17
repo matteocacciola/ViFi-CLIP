@@ -22,6 +22,7 @@ from trainers import vificlip
 import mlflow
 import mlflow.pytorch
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.utils.multiclass import unique_labels
 import cv2
 
 
@@ -48,21 +49,21 @@ def parse_option():
 
 
 def main(config):
-#    mlflow.set_tracking_uri("file:/home/ecuser/mlflow_logs")
-#    mlflow.set_experiment("ViFi-CLIP Few-Shot")
-#    with mlflow.start_run():
-#        mlflow.log_params({
-#            "epochs": config.TRAIN.EPOCHS,
-#            "lr": config.TRAIN.LR,
-#            "batch_size": config.TRAIN.BATCH_SIZE,
-#            "weight_decay": config.TRAIN.WEIGHT_DECAY,
-#        })
-#        mlflow.log_param("model", config.MODEL.ARCH)
-#        mlflow.log_param("num_classes", config.DATA.NUM_CLASSES)
-#        mlflow.log_param("opt_level", config.TRAIN.OPT_LEVEL)
-#        mlflow.log_param("mixup", config.AUG.MIXUP)
-#        mlflow.log_param("label_smoothing", config.AUG.LABEL_SMOOTH)
-#        mlflow.log_param("config_file", os.path.basename(args.config))
+    mlflow.set_tracking_uri("file:/home/ecuser/mlflow_logs")
+    mlflow.set_experiment("ViFi-CLIP Few-Shot")
+    with mlflow.start_run():
+        mlflow.log_params({
+            "epochs": config.TRAIN.EPOCHS,
+            "lr": config.TRAIN.LR,
+            "batch_size": config.TRAIN.BATCH_SIZE,
+            "weight_decay": config.TRAIN.WEIGHT_DECAY,
+        })
+        mlflow.log_param("model", config.MODEL.ARCH)
+        mlflow.log_param("num_classes", config.DATA.NUM_CLASSES)
+        mlflow.log_param("opt_level", config.TRAIN.OPT_LEVEL)
+        mlflow.log_param("mixup", config.AUG.MIXUP)
+        mlflow.log_param("label_smoothing", config.AUG.LABEL_SMOOTH)
+        mlflow.log_param("config_file", os.path.basename(args.config))
 
     train_data, val_data, train_loader, val_loader = build_dataloader(logger, config)
     class_names = [class_name for _, class_name in train_data.classes]
@@ -122,13 +123,37 @@ def main(config):
 
         if epoch % config.SAVE_FREQ == 0 or epoch == config.TRAIN.EPOCHS - 1:
             acc1, precision, recall, f1, y_true, y_pred = validate(val_loader, model, config, return_preds=True)
-            mlflow.log_metrics({
-                "val_acc": acc1,
-                "val_precision": precision,
-                "val_recall": recall,
-                "val_f1": f1
-            }, step=epoch)
-            # log_conf_matrix(y_true, y_pred, class_names)
+            # Logging delle metriche
+            mlflow.log_metric("val_acc", acc1, step=epoch)
+            mlflow.log_metric("val_precision", precision, step=epoch)
+            mlflow.log_metric("val_recall", recall, step=epoch)
+            mlflow.log_metric("val_f1", f1, step=epoch)
+            # Confusion matrix
+            if dist.get_rank() == 0:
+                import matplotlib.pyplot as plt
+                from sklearn.metrics import ConfusionMatrixDisplay
+                import tempfile
+
+                fig, ax = plt.subplots(figsize=(8, 8))
+                # Calcolo solo le classi presenti in y_true o y_pred
+                present_labels = unique_labels(y_true, y_pred)
+                present_class_names = [class_names[i] for i in present_labels]
+
+                ConfusionMatrixDisplay.from_predictions(
+                    y_true,
+                    y_pred,
+                    display_labels=present_class_names,
+                    ax=ax,
+                    xticks_rotation=45,
+                    colorbar=False
+                )
+
+                fig.tight_layout()
+
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
+                    fig.savefig(tmpfile.name)
+                    mlflow.log_artifact(tmpfile.name, artifact_path="confusion_matrices")
+                plt.close(fig)
 
             logger.info(f"Val acc: {acc1:.2f}%, Precision: {precision:.2f}, Recall: {recall:.2f}, F1: {f1:.2f}")
             is_best = acc1 > max_accuracy
@@ -154,7 +179,7 @@ def train_one_epoch(epoch, model, criterion, optimizer, lr_scheduler, train_load
     num_steps = len(train_loader)
     batch_time = AverageMeter()
     tot_loss_meter = AverageMeter()
-    scaler = GradScaler('cuda', enabled=(config.TRAIN.OPT_LEVEL != 'O0'))
+    #scaler = GradScaler('cuda', enabled=(config.TRAIN.OPT_LEVEL != 'O0'))
 
     start = end = time.time()
 
@@ -165,17 +190,22 @@ def train_one_epoch(epoch, model, criterion, optimizer, lr_scheduler, train_load
         if mixup_fn:
             images, label_id = mixup_fn(images, label_id)
 
-        with autocast('cuda', enabled=(config.TRAIN.OPT_LEVEL != 'O0')):
-            output = model(images)
-            total_loss = criterion(output, label_id) / config.TRAIN.ACCUMULATION_STEPS
+        output = model(images.float())  # forza float32
+        total_loss = criterion(output, label_id) / config.TRAIN.ACCUMULATION_STEPS
+        total_loss.backward()
 
-        scaler.scale(total_loss).backward()
+        #with autocast('cuda', enabled=(config.TRAIN.OPT_LEVEL != 'O0')):
+        #    output = model(images)
+        #    total_loss = criterion(output, label_id) / config.TRAIN.ACCUMULATION_STEPS
+
+        #scaler.scale(total_loss).backward()
 
         if config.TRAIN.ACCUMULATION_STEPS == 1 or (
                 config.TRAIN.ACCUMULATION_STEPS > 1 and (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0
         ):
-            scaler.step(optimizer)
-            scaler.update()
+            #scaler.step(optimizer)
+            #scaler.update()
+            optimizer.step()
             optimizer.zero_grad()
             lr_scheduler.step_update(epoch * num_steps + idx)
 
@@ -215,12 +245,7 @@ def validate(val_loader, model, config, return_preds=False):
 
         tot_similarity = torch.zeros((b, config.DATA.NUM_CLASSES)).cuda()
         for i in range(n):
-            image_input = _image[:, i].cuda(non_blocking=True)
-            label_id = label_id.cuda(non_blocking=True)
-
-            if config.TRAIN.OPT_LEVEL == 'O2':
-                image_input = image_input.half()
-
+            image_input = _image[:, i].cuda(non_blocking=True).float()
             similarity = model(image_input).view(b, -1).softmax(dim=-1)
             tot_similarity += similarity
 
