@@ -242,7 +242,7 @@ def returnCLIP(config, logger=None,
                     param.requires_grad_(True)
                 else:
                     param.requires_grad_(False)
-        else: # Custom freezing for ViT-B/16
+        elif train_complete_clip == "custom_freeze": # Custom freezing for ViT-B/16
             logger.info("Freezing all but the last two blocks of the Vision Transformer and the text encoder.")
             # Freeze all parameters initially
             for name, param in model.named_parameters():
@@ -279,5 +279,3 @@ def returnCLIP(config, logger=None,
     logger.info(f"Total learnable items: {len(enabled)}")
     model.float()
     return model
-
-
