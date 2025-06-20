@@ -228,21 +228,48 @@ def returnCLIP(config, logger=None,
             logger.info("Turning on gradients for COMPLETE ViFi-CLIP model")
             for name, param in model.named_parameters():
                 param.requires_grad_(True)
-        else:
-            if train_complete_clip == "image":
-                logger.info("Turning on gradients for image side the ViFi-CLIP model")
-                for name, param in model.named_parameters():
-                    if "image_encoder" in name:  # replace by "text_encoder" incase you want to freeze text
-                        param.requires_grad_(True)
-                    else:
-                        param.requires_grad_(False)
-            else:
-                logger.info("Turning on gradients for TEXT side the ViFi-CLIP model")
-                for name, param in model.named_parameters():
-                    if "text_encoder" in name:  # replace by "text_encoder" incase you want to freeze text
-                        param.requires_grad_(True)
-                    else:
-                        param.requires_grad_(False)
+        elif train_complete_clip == "image":
+            logger.info("Turning on gradients for image side the ViFi-CLIP model")
+            for name, param in model.named_parameters():
+                if "image_encoder" in name:  # replace by "text_encoder" incase you want to freeze text
+                    param.requires_grad_(True)
+                else:
+                    param.requires_grad_(False)
+        elif train_complete_clip == "text":
+            logger.info("Turning on gradients for TEXT side the ViFi-CLIP model")
+            for name, param in model.named_parameters():
+                if "text_encoder" in name:  # replace by "text_encoder" incase you want to freeze text
+                    param.requires_grad_(True)
+                else:
+                    param.requires_grad_(False)
+        else: # Custom freezing for ViT-B/16
+            logger.info("Freezing all but the last two blocks of the Vision Transformer and the text encoder.")
+            # Freeze all parameters initially
+            for name, param in model.named_parameters():
+                param.requires_grad_(False)
+
+            # Unfreeze the last two blocks of the image encoder
+            # ViT-B/16 has 12 blocks, so blocks 10 and 11 are the last two
+            num_blocks = len(model.image_encoder.transformer.resblocks)
+            for i in range(num_blocks - 2, num_blocks):
+                for name, param in model.image_encoder.transformer.resblocks[i].named_parameters():
+                    param.requires_grad_(True)
+                    logger.info(f"Unfreezing image_encoder.transformer.resblocks[{i}].{name}")
+
+            # Unfreeze the text encoder
+            for name, param in model.text_encoder.named_parameters():
+                param.requires_grad_(True)
+                logger.info(f"Unfreezing text_encoder.{name}")
+
+            # Unfreeze the prompt_learner (if used)
+            for name, param in model.prompt_learner.named_parameters():
+                param.requires_grad_(True)
+                logger.info(f"Unfreezing prompt_learner.{name}")
+
+            # Unfreeze logit_scale
+            model.logit_scale.requires_grad_(True)
+            logger.info(f"Unfreezing logit_scale")
+
     # Double check
     enabled = set()
     for name, param in model.named_parameters():
@@ -252,3 +279,5 @@ def returnCLIP(config, logger=None,
     logger.info(f"Total learnable items: {len(enabled)}")
     model.float()
     return model
+
+
