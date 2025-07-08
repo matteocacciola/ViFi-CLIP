@@ -1,0 +1,6 @@
+id,name
+0,accident_stopped_vehicle
+1,fire
+2,fog
+3,no_event
+4,traffic_jam

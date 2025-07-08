@@ -150,15 +150,6 @@ class ModifiedResNet(nn.Module):
         return x
 
 
-class LayerNorm(nn.LayerNorm):
-    """Subclass torch's LayerNorm to handle fp16."""
-
-    def forward(self, x: torch.Tensor):
-        orig_type = x.dtype
-        ret = super().forward(x.type(torch.float32))
-        return ret.type(orig_type)
-
-
 class QuickGELU(nn.Module):
     def forward(self, x: torch.Tensor):
         return x * torch.sigmoid(1.702 * x)
@@ -170,36 +161,38 @@ class ResidualAttentionBlock_ViFi_CLIP(nn.Module):
         super().__init__()
 
         self.attn = nn.MultiheadAttention(d_model, n_head)
-        self.ln_1 = LayerNorm(d_model)
+        self.ln_1 = nn.LayerNorm(d_model)
         self.mlp = nn.Sequential(OrderedDict([
             ("c_fc", nn.Linear(d_model, d_model * 4)),
             ("gelu", QuickGELU()),
             ("c_proj", nn.Linear(d_model * 4, d_model))
         ]))
-        self.ln_2 = LayerNorm(d_model)
+        self.ln_2 = nn.LayerNorm(d_model)
         # Only add learnable tokens if flag is set True
         # For the first iteration i, we should not add the learnable parameters
         # as it is already been taken care of in the very start, for both text
         # and the visual branch
         self.text_layer = text_layer
-        self.attn_mask = attn_mask
-        if i != 0:
-            self.add_prompt = add_prompt
-            if self.add_prompt:
-                if self.text_layer:
-                    self.n_ctx_text = design_details["language_ctx"]  # hyperparameter
-                    ctx_vectors = torch.empty(self.n_ctx_text, d_model)
-                else:
-                    self.n_ctx_visual = design_details["vision_ctx"]  # hyperparameter
-                    ctx_vectors = torch.empty(self.n_ctx_visual, d_model)
-                # Code snippet for per layer visual prompts
-                nn.init.normal_(ctx_vectors, std=0.02)
-                self.VPT_shallow = nn.Parameter(ctx_vectors)
+        if attn_mask is None:
+            self.attn_mask = None
         else:
-            self.add_prompt = False
+            self.register_buffer("attn_mask", attn_mask)
+        
+        self.add_prompt = (i != 0 and add_prompt)
+        if self.add_prompt:
+            if self.text_layer:
+                self.n_ctx_text = design_details["language_ctx"]  # hyperparameter
+                ctx_vectors = torch.empty(self.n_ctx_text, d_model)
+            else:
+                self.n_ctx_visual = design_details["vision_ctx"]  # hyperparameter
+                ctx_vectors = torch.empty(self.n_ctx_visual, d_model)
+            # Code snippet for per layer visual prompts
+            nn.init.normal_(ctx_vectors, std=0.02)
+            self.VPT_shallow = nn.Parameter(ctx_vectors)
+
 
     def attention(self, x: torch.Tensor):
-        self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
+        # self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
         return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
 
     def forward(self, x: torch.Tensor):
@@ -211,7 +204,7 @@ class ResidualAttentionBlock_ViFi_CLIP(nn.Module):
                 # Remove the outputs produced by learnable tokens of previous layer
                 prefix = x[0:x.shape[0] - self.n_ctx_visual, :, :]
                 # Create/configure learnable tokens of this layer
-                visual_context = self.VPT_shallow.expand(x.shape[1], -1, -1).permute(1, 0, 2).half()
+                visual_context = self.VPT_shallow.expand(x.shape[1], -1, -1).permute(1, 0, 2).type_as(x)
                 # Add the learnable tokens of this layer with the input, by replacing the previous
                 # layer learnable tokens
                 x = torch.cat([prefix, visual_context], dim=0)
@@ -222,7 +215,7 @@ class ResidualAttentionBlock_ViFi_CLIP(nn.Module):
                 prefix = x[:1, :, :]
                 suffix = x[1 + self.n_ctx_text:, :, :]
                 # Create/configure learnable tokens of this layer
-                textual_context = self.VPT_shallow.expand(x.shape[1], -1, -1).permute(1, 0, 2).half()
+                textual_context = self.VPT_shallow.expand(x.shape[1], -1, -1).permute(1, 0, 2).type_as(x)
                 # Add the learnable tokens of this layer with the input, replaced by previous
                 # layer learnable tokens
                 x = torch.cat([prefix, textual_context, suffix], dim=0)
@@ -270,14 +263,14 @@ class VisionTransformer(nn.Module):
         scale = width ** -0.5
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
         self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
-        self.ln_pre = LayerNorm(width)
+        self.ln_pre = nn.LayerNorm(width)
         # hyper-parameter if need to add prompt embeddings inside to the input
         # of transformer block or not:
         self.prompt_till_layer_visual = design_details["vision_depth"]
         self.transformer = Transformer(width, layers, heads, prompts_needed=self.prompt_till_layer_visual,
                                        design_details=design_details)
 
-        self.ln_post = LayerNorm(width)
+        self.ln_post = nn.LayerNorm(width)
         self.proj = nn.Parameter(scale * torch.randn(width, output_dim))
 
     def forward(self, x: torch.Tensor):
@@ -291,7 +284,7 @@ class VisionTransformer(nn.Module):
         # After positional embeddings, we will attach prompts with the model, remember only those
         # are trainable parameters here in whole image encoder.
         if self.VPT_shallow:
-            visual_ctx = self.VPT.expand(x.shape[0], -1, -1).half()
+            visual_ctx = self.VPT.expand(x.shape[0], -1, -1).type_as(x)
             x = torch.cat([x, visual_ctx], dim=1)
         else:
             assert self.prompt_till_layer_visual == 0
@@ -368,7 +361,7 @@ class CLIP(nn.Module):
         self.vocab_size = vocab_size
         self.token_embedding = nn.Embedding(vocab_size, transformer_width)
         self.positional_embedding = nn.Parameter(torch.empty(self.context_length, transformer_width))
-        self.ln_final = LayerNorm(transformer_width)
+        self.ln_final = nn.LayerNorm(transformer_width)
 
         self.text_projection = nn.Parameter(torch.empty(transformer_width, embed_dim))
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))

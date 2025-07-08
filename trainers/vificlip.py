@@ -72,7 +72,7 @@ class VLPromptLearner(nn.Module):
             tokenized_prompts = torch.cat([clip.tokenize(text_aug.format(c), context_length=77) for c in classnames])
             embedding = clip_model.token_embedding(tokenized_prompts).type(dtype).cuda()
             self.register_buffer("complete_text_embeddings", embedding)
-            self.tokenized_prompts = tokenized_prompts  # torch.Tensor
+            self.register_buffer("tokenized_prompts", tokenized_prompts)
         elif self.use_prompt_stage:
             n_cls = len(classnames)
             # Make sure Language depth >= 1
@@ -115,7 +115,7 @@ class VLPromptLearner(nn.Module):
             self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS
             self.register_buffer("token_suffix", embedding[:, 1 + n_ctx:, :])  # CLS, EOS
             self.n_cls = n_cls
-            self.tokenized_prompts = tokenized_prompts  # torch.Tensor
+            self.register_buffer("tokenized_prompts", tokenized_prompts)
         else:
             # No prompting
             ctx_init = ctx_init.replace("_", " ")
@@ -125,7 +125,7 @@ class VLPromptLearner(nn.Module):
             with torch.no_grad():
                 embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
             self.register_buffer("complete_text_embeddings", embedding)
-            self.tokenized_prompts = tokenized_prompts  # torch.Tensor
+            self.register_buffer("tokenized_prompts", tokenized_prompts)
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
         # dim0 is either batch_size (during training) or n_cls (during testing)
@@ -167,13 +167,11 @@ class ViFiCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model, logger):
         super().__init__()
         self.prompt_learner = VLPromptLearner(cfg, classnames, clip_model, logger)
-        self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.image_encoder = clip_model.visual
         self.text_encoder = TextEncoder(clip_model)
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
     def forward(self, image):
-        tokenized_prompts = self.tokenized_prompts
         logit_scale = self.logit_scale.exp()
         prompts = self.prompt_learner()
 
@@ -194,7 +192,7 @@ class ViFiCLIP(nn.Module):
         image_features = image_features.mean(dim=1, keepdim=False)  # image features are now ready
 
         # Finally, make the text features
-        text_features = self.text_encoder(prompts, tokenized_prompts)
+        text_features = self.text_encoder(prompts, self.prompt_learner.tokenized_prompts)
 
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
