@@ -1,34 +1,18 @@
-from logging import Logger
-from torch.utils.data import DataLoader
+from abc import ABCMeta, abstractmethod
+from collections import defaultdict
+import copy
+import os.path as osp
+from typing import Optional
+
+from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
 import torch
 import numpy as np
-from functools import partial
-import random
-
-import io
-import os
-import os.path as osp
-import shutil
-import warnings
-from collections.abc import Mapping, Sequence
-from mmcv.utils import Registry, build_from_cfg
-from torch.utils.data import Dataset
-import copy
-import os.path as osp
-import warnings
-from abc import ABCMeta, abstractmethod
-from collections import OrderedDict, defaultdict
-import os.path as osp
-import mmcv
-import numpy as np
-import torch
-import tarfile
-from .pipeline import *
-from torch.utils.data import DataLoader
-from torch.utils.data.dataloader import default_collate
-from mmcv.parallel import collate
+import mmengine
+from mmengine.registry import Registry
 import pandas as pd
+
+from .pipeline import Compose
 
 PIPELINES = Registry('pipeline')
 img_norm_cfg = dict(
@@ -41,10 +25,10 @@ class BaseDataset(Dataset, metaclass=ABCMeta):
         ann_file,
         pipeline,
         repeat = 1,
-        data_prefix=None,
+        data_prefix: Optional[str] = None,
         test_mode=False,
         multi_class=False,
-        num_classes=None,
+        num_classes: Optional[int] = None,
         start_index=1,
         modality='RGB',
         sample_by_class=False,
@@ -86,14 +70,14 @@ class BaseDataset(Dataset, metaclass=ABCMeta):
             self.class_prob = dict(zip(self.video_infos_by_class, class_prob))
 
     @abstractmethod
-    def load_annotations(self):
+    def load_annotations(self) -> list:
         """Load the annotation according to ann_file into video_infos."""
 
     # json annotations already looks like video_infos, so for each dataset,
     # this func should be the same
-    def load_json_annotations(self):
+    def load_json_annotations(self) -> list:
         """Load json annotation file to get video information."""
-        video_infos = mmcv.load(self.ann_file)
+        video_infos = mmengine.load(self.ann_file)
         num_videos = len(video_infos)
         path_key = 'frame_dir' if 'frame_dir' in video_infos[0] else 'filename'
         for i in range(num_videos):
@@ -124,7 +108,7 @@ class BaseDataset(Dataset, metaclass=ABCMeta):
     @staticmethod
     def dump_results(results, out):
         """Dump data to json/yaml/pickle strings or files."""
-        return mmcv.dump(results, out)
+        return mmengine.dump(results, out)
 
     def prepare_train_frames(self, idx):
         """Prepare the frames for training given the index."""
@@ -228,21 +212,6 @@ class SubsetRandomSampler(torch.utils.data.Sampler):
         self.epoch = epoch
 
 
-def mmcv_collate(batch, samples_per_gpu=1): 
-    if not isinstance(batch, Sequence):
-        raise TypeError(f'{batch.dtype} is not supported.')
-    if isinstance(batch[0], Sequence):
-        transposed = zip(*batch)
-        return [collate(samples, samples_per_gpu) for samples in transposed]
-    elif isinstance(batch[0], Mapping):
-        return {
-            key: mmcv_collate([d[key] for d in batch], samples_per_gpu)
-            for key in batch[0]
-        }
-    else:
-        return default_collate(batch)
-
-
 def build_dataloader(logger, config):
     scale_resize = int(256 / 224 * config.DATA.INPUT_SIZE)
 
@@ -281,7 +250,6 @@ def build_dataloader(logger, config):
         num_workers=8,
         pin_memory=True,
         drop_last=True,
-        collate_fn=partial(mmcv_collate, samples_per_gpu=config.TRAIN.BATCH_SIZE),
     )
     
     val_pipeline = [
@@ -310,7 +278,6 @@ def build_dataloader(logger, config):
         num_workers=8,
         pin_memory=True,
         drop_last=True,
-        collate_fn=partial(mmcv_collate, samples_per_gpu=2),
     )
 
     return train_data, val_data, train_loader, val_loader

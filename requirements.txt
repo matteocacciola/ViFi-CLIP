@@ -4,8 +4,9 @@
 --extra-index-url https://download.pytorch.org/whl/cu128
 torch==2.7.0+cu128
 torchvision==0.22.0+cu128
-numpy~=1.23.5
-mmcv-full
+numpy #~=1.23.5
+mmcv
+mmengine
 decord
 ftfy
 einops
@@ -14,9 +15,8 @@ timm
 regex
 yacs
 pandas
-onnx~=1.18.0
-onnxscript~=0.3.1
-onnxruntime
+onnx
+onnxscript
 onnxruntime-gpu
 
 # ipybb dependencies

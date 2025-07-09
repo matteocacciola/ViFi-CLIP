@@ -42,14 +42,13 @@ class TextEncoder(nn.Module):
         self.positional_embedding = clip_model.positional_embedding
         self.ln_final = clip_model.ln_final
         self.text_projection = clip_model.text_projection
-        self.dtype = clip_model.dtype
 
-    def forward(self, prompts, tokenized_prompts):
-        x = prompts + self.positional_embedding.type(self.dtype)
+    def forward(self, prompts: torch.Tensor, tokenized_prompts: torch.Tensor):
+        x = prompts + self.positional_embedding
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
-        x = self.ln_final(x).type(self.dtype)
+        x = self.ln_final(x)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
         # take features from the eot embedding (eot_token is the highest number in each sequence)
@@ -63,14 +62,14 @@ class TextEncoder(nn.Module):
 class VLPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model, logger):
         super().__init__()
-        dtype = clip_model.dtype
+        clip_dtype = clip_model.dtype
         self.use_prompt_stage = cfg.TRAINER.ViFi_CLIP.PROMPT_MODEL
         ctx_init = cfg.TRAINER.ViFi_CLIP.CTX_INIT
         ZS_evaluation = cfg.TRAINER.ViFi_CLIP.ZS_EVAL
         if ZS_evaluation:
             text_aug = f"{{}}"
             tokenized_prompts = torch.cat([clip.tokenize(text_aug.format(c), context_length=77) for c in classnames])
-            embedding = clip_model.token_embedding(tokenized_prompts).type(dtype).cuda()
+            embedding = clip_model.token_embedding(tokenized_prompts).to(clip_dtype)
             self.register_buffer("complete_text_embeddings", embedding)
             self.register_buffer("tokenized_prompts", tokenized_prompts)
         elif self.use_prompt_stage:
@@ -88,15 +87,15 @@ class VLPromptLearner(nn.Module):
                 n_ctx = n_ctx
                 prompt = clip.tokenize(ctx_init)
                 with torch.no_grad():
-                    embedding = clip_model.token_embedding(prompt).type(dtype)
+                    embedding = clip_model.token_embedding(prompt).to(clip_dtype)
                 ctx_vectors = embedding[0, 1: 1 + n_ctx, :]
                 prompt_prefix = ctx_init
             else:
                 # random initialization
-                ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
+                ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=clip_dtype)
                 nn.init.normal_(ctx_vectors, std=0.02)
                 prompt_prefix = " ".join(["X"] * n_ctx)
-            logger.info(f"V-L design")
+            logger.info("V-L design")
             logger.info(f'Initial text context: "{prompt_prefix}"')
             logger.info(f"Number of context words (tokens) for Language prompting: {n_ctx}")
             logger.info(f"Number of context words (tokens) for Vision prompting: {cfg.TRAINER.ViFi_CLIP.N_CTX_VISION}")
@@ -107,7 +106,7 @@ class VLPromptLearner(nn.Module):
 
             tokenized_prompts = torch.cat([clip.tokenize(p) for p in prompts])  # (n_cls, n_tkn)
             with torch.no_grad():
-                embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
+                embedding = clip_model.token_embedding(tokenized_prompts).to(clip_dtype)
 
             # These token vectors will be saved when in save_model(),
             # but they should be ignored in load_model() as we want to use
@@ -123,7 +122,7 @@ class VLPromptLearner(nn.Module):
             prompts = [prompt_prefix + " " + name + "." for name in classnames]
             tokenized_prompts = torch.cat([clip.tokenize(p) for p in prompts])  # (n_cls, n_tkn)
             with torch.no_grad():
-                embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
+                embedding = clip_model.token_embedding(tokenized_prompts).to(clip_dtype)
             self.register_buffer("complete_text_embeddings", embedding)
             self.register_buffer("tokenized_prompts", tokenized_prompts)
 
@@ -170,7 +169,6 @@ class ViFiCLIP(nn.Module):
         self.image_encoder = clip_model.visual
         self.text_encoder = TextEncoder(clip_model)
         self.logit_scale = clip_model.logit_scale
-        self.dtype = clip_model.dtype
     def forward(self, image):
         logit_scale = self.logit_scale.exp()
         prompts = self.prompt_learner()
@@ -181,11 +179,7 @@ class ViFiCLIP(nn.Module):
         # Remove the batch dimensions
         image = image.reshape(-1, c, h, w)
         # Now pass the image into CLIP visual encoder
-        #image_features = self.image_encoder(image.type(self.dtype))
-        image = image.to(dtype=self.image_encoder.conv1.weight.dtype)
         image_features = self.image_encoder(image)
-
-
         # Now again attach the batch dimensions
         image_features = image_features.view(b, t, -1)  # [B, T, 512]
         # Now take the mean along the temporal direction

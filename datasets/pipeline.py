@@ -1,29 +1,23 @@
+from collections.abc import Sequence
 import io
 import os
-import os.path as osp
-import shutil
 import warnings
-from collections.abc import Sequence
-from mmcv.utils import Registry, build_from_cfg
-from torch.utils.data import Dataset
-import copy
-import os.path as osp
-import warnings
-from abc import ABCMeta, abstractmethod
-from collections import OrderedDict, defaultdict
-import os.path as osp
+from typing import Optional
+import random
+
+import mmengine
+from mmengine.registry import Registry, build_from_cfg
+from mmengine import BaseStorageBackend
 import mmcv
 import numpy as np
 import torch
 import tarfile
 import timm.data as tdata
 from torch.nn.modules.utils import _pair
-import random
 import torchvision
 from PIL import Image
-from .rand_augment import rand_augment_transform
 from torchvision import transforms
-from mmcv.fileio import FileClient
+from .rand_augment import rand_augment_transform
 
 PIPELINES = Registry('pipeline')
 
@@ -255,7 +249,7 @@ class Imgaug:
         args = cfg.copy()
 
         obj_type = args.pop('type')
-        if mmcv.is_str(obj_type):
+        if mmengine.is_str(obj_type):
             obj_cls = getattr(iaa, obj_type) if hasattr(iaa, obj_type) \
                 else getattr(iaa.pillike, obj_type)
         elif issubclass(obj_type, iaa.Augmenter):
@@ -645,10 +639,10 @@ class RandomResizedCrop(RandomCrop):
         self.area_range = area_range
         self.aspect_ratio_range = aspect_ratio_range
         self.lazy = lazy
-        if not mmcv.is_tuple_of(self.area_range, float):
+        if not mmengine.is_tuple_of(self.area_range, float):
             raise TypeError(f'Area_range must be a tuple of float, '
                             f'but got {type(area_range)}')
-        if not mmcv.is_tuple_of(self.aspect_ratio_range, float):
+        if not mmengine.is_tuple_of(self.aspect_ratio_range, float):
             raise TypeError(f'Aspect_ratio_range must be a tuple of float, '
                             f'but got {type(aspect_ratio_range)}')
 
@@ -821,7 +815,7 @@ class MultiScaleCrop(RandomCrop):
                  num_fixed_crops=5,
                  lazy=False):
         self.input_size = _pair(input_size)
-        if not mmcv.is_tuple_of(self.input_size, int):
+        if not mmengine.is_tuple_of(self.input_size, int):
             raise TypeError(f'Input_size must be int or tuple of int, '
                             f'but got {type(input_size)}')
 
@@ -1108,7 +1102,7 @@ class RandomRescale:
     def __init__(self, scale_range, interpolation='bilinear'):
         self.scale_range = scale_range
         # make sure scale_range is legal, first make sure the type is OK
-        assert mmcv.is_tuple_of(scale_range, int)
+        assert mmengine.is_tuple_of(scale_range, int)
         assert len(scale_range) == 2
         assert scale_range[0] < scale_range[1]
         assert np.all([x > 0 for x in scale_range])
@@ -1390,7 +1384,7 @@ class CenterCrop(RandomCrop):
     def __init__(self, crop_size, lazy=False):
         self.crop_size = _pair(crop_size)
         self.lazy = lazy
-        if not mmcv.is_tuple_of(self.crop_size, int):
+        if not mmengine.is_tuple_of(self.crop_size, int):
             raise TypeError(f'Crop_size must be int or tuple of int, '
                             f'but got {type(crop_size)}')
 
@@ -1488,7 +1482,7 @@ class ThreeCrop:
 
     def __init__(self, crop_size):
         self.crop_size = _pair(crop_size)
-        if not mmcv.is_tuple_of(self.crop_size, int):
+        if not mmengine.is_tuple_of(self.crop_size, int):
             raise TypeError(f'Crop_size must be int or tuple of int, '
                             f'but got {type(crop_size)}')
 
@@ -1562,7 +1556,7 @@ class TenCrop:
 
     def __init__(self, crop_size):
         self.crop_size = _pair(crop_size)
-        if not mmcv.is_tuple_of(self.crop_size, int):
+        if not mmengine.is_tuple_of(self.crop_size, int):
             raise TypeError(f'Crop_size must be int or tuple of int, '
                             f'but got {type(crop_size)}')
 
@@ -1639,7 +1633,7 @@ class MultiGroupCrop:
     def __init__(self, crop_size, groups):
         self.crop_size = _pair(crop_size)
         self.groups = groups
-        if not mmcv.is_tuple_of(self.crop_size, int):
+        if not mmengine.is_tuple_of(self.crop_size, int):
             raise TypeError('Crop size must be int or tuple of int, '
                             f'but got {type(crop_size)}')
 
@@ -1772,11 +1766,11 @@ class DecordInit:
     added or modified keys are "video_reader" and "total_frames".
     """
 
-    def __init__(self, io_backend='disk', num_threads=1, **kwargs):
+    def __init__(self, io_backend='local', num_threads=1, **kwargs):
         self.io_backend = io_backend
         self.num_threads = num_threads
         self.kwargs = kwargs
-        self.file_client = None
+        self.file_backend : Optional[BaseStorageBackend] = None
         self.tarfile = None
 
     def __call__(self, results):
@@ -1792,9 +1786,9 @@ class DecordInit:
             raise ImportError(
                 'Please run "pip install decord" to install Decord first.')
         if results['tar'] is False:
-            if self.file_client is None:
-                self.file_client = FileClient(self.io_backend, **self.kwargs)
-            file_obj = io.BytesIO(self.file_client.get(results['filename']))
+            if self.file_backend is None:
+                self.file_backend = mmengine.get_file_backend(backend_args={'backend': self.io_backend}, **self.kwargs)
+            file_obj = io.BytesIO(self.file_backend.get(results['filename']))
         else:
             if self.tarfile is None:
                 data_root = os.path.dirname(results['filename']) + '.tar'
@@ -2235,7 +2229,7 @@ def to_tensor(data):
         return data
     if isinstance(data, np.ndarray):
         return torch.from_numpy(data)
-    if isinstance(data, Sequence) and not mmcv.is_str(data):
+    if isinstance(data, Sequence) and not mmengine.is_str(data):
         return torch.tensor(data)
     if isinstance(data, int):
         return torch.LongTensor([data])
