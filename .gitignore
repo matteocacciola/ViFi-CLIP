@@ -49,3 +49,10 @@ pgdata/
 
 # datasets
 datasets/
+
+
+mlflow_logs/
+
+# pixi environments
+.pixi
+*.egg-info

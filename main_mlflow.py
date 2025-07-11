@@ -51,7 +51,7 @@ def parse_option():
 
 
 def main(config, args):
-    mlflow.set_tracking_uri("file:/home/ecuser/mlflow_logs")
+    mlflow.set_tracking_uri("file:./mlflow_logs")
     mlflow.set_experiment(args.experiment_name)
 
     if args.run_name is None:

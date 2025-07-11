@@ -56,7 +56,7 @@ def epoch_saving(config, epoch, model,  max_accuracy, optimizer, lr_scheduler, l
     torch.save(save_state, save_path)
     logger.info(f"{save_path} saved !!!")
     if is_best:
-        best_path = os.path.join(working_dir, f'best.pth')
+        best_path = os.path.join(working_dir, 'best.pth')
         torch.save(save_state, best_path)
         logger.info(f"{best_path} saved !!!")
 

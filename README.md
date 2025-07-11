@@ -178,7 +178,26 @@ ViFi-CLIP is first trained on K400 and then vision and language prompts are furt
 | [ViFi-CLIP](configs/fully_supervised/k400/16_16_vifi_clip.yaml)            |   281    | 16x224 |    83.9    |    96.3    | [link](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EfqisYTGKlVIiPI0QHG-pxMBuBMA0906jX_kPpaRGw9Ksw?e=TdbaBU) |
 
 ## Installation 
-For installation and other package requirements, please follow the instructions detailed in [INSTALL.md](docs/INSTALL.md). 
+For installation and other package requirements, please follow the following instructions:
+
+```bash
+# Install pixi package manager (https://pixi.sh/latest/installation/)
+curl -fsSL https://pixi.sh/install.sh | sh
+
+# Install dependencies for production: (default) environment
+pixi install
+# Or install also the development dependencies (dev) environment
+pixi install -e dev
+
+# Direcly run a task specified in the pixi.toml or a custom command
+pixi run train [./config_file.yml]
+pixi run [-e dev] python main.py
+# Or activate the env in the shell (optionally specify the environment)
+pixi shell [-e dev]
+python main.py
+```
+
+Old installation procedure is detailed in [INSTALL.md](docs/INSTALL.md).
 
 ## Data preparation
 Please follow the instructions at [DATASETS.md](docs/DATASETS.md) to prepare all datasets.

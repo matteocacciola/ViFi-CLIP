@@ -17,8 +17,9 @@ yacs
 pandas
 onnx
 onnxscript
+onnxconverter-common
 onnxruntime-gpu
 
-# ipybb dependencies
+# ipynb dependencies
 ipykernel
 ipywidgets
