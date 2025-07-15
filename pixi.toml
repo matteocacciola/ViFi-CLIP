@@ -7,7 +7,7 @@ version = "0.1.0"
 
 [tasks.train]
 args = [{ "arg" = "config", "default" = "../data/movyon/config_vificlip_with_freeze.yml" }]
-cmd = "torchrun main_mlflow.py --local_rank=0 --config {{ config }}"
+cmd = "torchrun main.py --with-mlflow --local_rank=0 --config {{ config }}"
 
 [system-requirements]
 cuda = "12.0"

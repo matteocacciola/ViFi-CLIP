@@ -2,6 +2,26 @@
 
 This version removes APEX dependency and uses PyTorch native AMP for training.
 
+## Original contributions
+
+### Usage of MLFlow
+MLFlow is used to track experiments, log parameters, metrics, and artifacts. It helps in managing the lifecycle of machine learning models.
+Please, check the [Training](#Training) section for more details on how to use MLFlow in this repository.
+
+###  Pixi commands
+Pixi is a package manager that helps to manage the environment and run tasks. It is used in this repository to manage dependencies and run training or evaluation tasks.
+You can use the following commands to run tasks in this repository:
+```bash
+# Directly run a task specified in the pixi.toml or a custom command
+pixi run train [./config_file.yml]
+pixi run [-e dev] python main.py
+# Or activate the env in the shell (optionally specify the environment)
+pixi shell [-e dev]
+python main.py
+```
+
+---
+
 # Fine-tuned CLIP models are efficient video learners [CVPR 2023]
 
 > [**Fine-tuned CLIP models are efficient video learners**](https://arxiv.org/abs/2212.03640)<br>
@@ -32,16 +52,6 @@ Official implementation of the paper "[Fine-tuned CLIP models are efficient vide
 [//]: # ()
 [//]: # (<hr />)
 
-# :rocket: News
-* **(Nov 24, 2023)**
-  * Interactive notebook released. Inference with ViFi-CLIP on custom videos without significant installation dependencies!
-* **(Feb 28, 2023)**
-  * Paper accepted at CVPR 2023 :tada: 
-* **(Dec 6, 2022)** 
-  * Training and evaluation codes for [ViFi-CLIP](https://arxiv.org/abs/2212.03640), along with pretrained models are released.
-  
-<hr />
-
 ## Highlights
 
 ![main figure](docs/main_figure.png)
@@ -54,7 +64,6 @@ and recent state-of-the-art work, XCLIP (last col.) (∆ represents difference o
 ViFi-CLIP are better separable, indicating that a simple fine-tuning of CLIP is sufficient to learn suitable 
 video-specific inductive biases, and can perform competitive to more complex approaches having dedicated components 
 designed to model temporal information in videos. </p>
-
 
 > **<p align="justify"> Abstract:** *Large-scale multi-modal training with image-text pairs imparts
 > strong generalization to CLIP model. Since training on a similar scale for videos is infeasible,
@@ -81,9 +90,8 @@ and can perform competitive to more complex approaches having dedicated componen
 2) **Base-to-novel generalization benchmark:** We introduce base-to-novel generalization benchmark for video-domain for evaluating the generalization ability of models for video action recognition.
 3) **Bridge and Prompt approach:** We show the effectiveness of our proposed ‘bridge and prompt’ approach to first bridge the modality gap through fine-tuning followed by prompt learning in both visual and language branches of the CLIP model
 for low-data regimes.
-
    
-# Model Zoo
+## Model Zoo
 NOTE: All models in our experiments below uses publicly available ViT/B-16 based CLIP model. The trained model weights against each experiment is provided in tables below.
 
 ### Zero-shot results
@@ -128,7 +136,6 @@ All models are trained on base classes and evaluated on both base and novel clas
 | [CLIP text-FT](configs/base2novel/finetuning_base2novel/ssv2)  | 32x224 |   12.4    |    9.5     | 10.8 | [seed1](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EdYLS33jyZZDsIy71Lk3TfwB76xrHL3BIRrUiNeSvWfnWg?e=ndm1JL)/[seed2](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EbpzILaqXJBKgPmTKBA32d0BsFrErjRCAwMwaXNKB39G5w?e=FbLCaN)/[seed3](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EY_VHJNKBhlFuir2dL1frOQB5GbG2UeSoG4p65Wh5wOHNg?e=HncWmy) |
 | [ViFi-CLIP](configs/base2novel/finetuning_base2novel/ssv2)     | 32x224 |   16.2    |    12.1    | 13.9 | [seed1](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/Ee9-LsJzAeROj0rsXZ_Kq2gBWfDTJX9yI3NhsP3Wx9XT7g?e=QTh28B)/[seed2](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/ETWroKKSa3VJmktA1qGcrUIBSWdSK8JaclCD7GpxXWMMRw?e=bNM8PS)/[seed3](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/Efl1L1g_OdJHvLu24Yzh3w4BMrTcdll8DilX13lB6rXaFw?e=lLvOiJ) |
 
-
 #### VL Prompting approach: Base-to-Novel
 ViFi-CLIP is first trained on K400 and then vision and language prompts are further fine-tuned on the downstream datasets.
 
@@ -137,7 +144,6 @@ ViFi-CLIP is first trained on K400 and then vision and language prompts are furt
 | [HMDB-51](configs/base2novel/prompting_base2novel/hmdb) | 32x224 |   77.1    |    54.9    | 64.1 | [seed1](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/Ee1tEk7Tw-dNibQEMVZYBPMBhYj2--lFdIceS1DNN55mUQ?e=qzP1vE)/[seed2](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EWxj-A1_EldJggHhBgVTFPIBdcGAXZn1yiWBATvgTKvLYg?e=WLfYUT)/[seed3](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EXT2ezu2RZBEnKuzkEwYb48BE9LYaXoh-cT9dNSruYiKyg?e=b5cbmX) |
 | [UCF-101](configs/base2novel/prompting_base2novel/ucf)  | 32x224 |   95.9    |    74.1    | 83.6 | [seed1](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EYNvOOiV0qZIj-YIZlIH-dcBr-8eALRnPse189llN7QiPQ?e=wbbxDB)/[seed2](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EeBoMzLQ-YNNtl5YAKS0MmkBoKWpxblQQk3ieT50OtwlQQ?e=16jKbC)/[seed3](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EWwQJkz41o9KgXkgpDoJnjYBCyCD4bV0pBS9XtAD8VpLoQ?e=VKyBNc) |
 | [SSv2](configs/base2novel/prompting_base2novel/ssv2)    | 32x224 |   15.8    |    11.5    | 13.3 | [seed1](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/ESey1Xo8Ka1HoJtu04xsng0BSTFIRgOty4AwIlnQL7iuJQ?e=n27FNI)/[seed2](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EeLJ6F4mXxBHgBj0qQEXkjkBOCImmwSns3J51yG9YIkjAQ?e=eoXWyd)/[seed3](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EQ8Vjdf0t8ZEuJFGlTBwP2sBmDRhM7FWuYmyOh0UZJdhPg?e=ZMppVA) |
-
 
 ### Few-shot results
 Below table shows few-shot results of ViFi-CLIP for K=2, 4, 8 and 16.
@@ -168,8 +174,6 @@ ViFi-CLIP is first trained on K400 and then vision and language prompts are furt
 | [UCF-101](configs/few_shot/prompting_few_shot/ucf101) | 32x224 | 91.0 | 93.7 | 95.0 | 96.4 | [K=2](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EXz03SRz-NdCmVcWpSt-GEwBxrBWmlGbitXq9iRGz8EczQ?e=zpongw)/[K=4](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EaFyG9bOXUhEnOsviO0BhowBpjvbRcJb9zCehcgyXdhHRQ?e=fl7H6a)/[K=8](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/ERM8RDkpandOshsedBwL0fQBrdQd26zjbaBGGGw1XhuTuQ?e=z8GDng)/[K=16](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EbUEylUsTyBOhPZqy99sY8UBMtE0AA46TdY-MTDs8ma0AA?e=g2038u) |
 | [SSv2](configs/few_shot/prompting_few_shot/ssv2)      | 32x224 | 6.7  | 7.9  | 10.2 | 13.5 | [K=2](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EbBoLMM3RnNAvoZ3TdoGYSMBFCfsB_gfaz3svxtyKUdxEA?e=KeIl1s)/[K=4](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EbzbcG00RgJFsezk_tnDmQkBCf7wPPIexuKEgUZJKgmMew?e=lEXJ45)/[K=8](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/ESVYfUXIjZ9CppbPt8mgKOABVKSljMNI2JiD9PLkoABSoQ?e=fxI1l1)/[K=16](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/Ec3wlwVsJ4FDprzfChxkZeoBqz4AH7Y4JRF1SjsvMsOWcw?e=ya59zp) |
 
-
-
 ### Fully-supervised results on Kinetics-400
 | Name  (configs)                                                            | FLOPS(G) | Input  | Top-1 Acc. | Top-5 Acc. |                                                                    Model                                                                     |
 |----------------------------------------------------------------------------|:--------:|:------:|:----------:|:----------:|:--------------------------------------------------------------------------------------------------------------------------------------------:|
@@ -188,13 +192,6 @@ curl -fsSL https://pixi.sh/install.sh | sh
 pixi install
 # Or install also the development dependencies (dev) environment
 pixi install -e dev
-
-# Direcly run a task specified in the pixi.toml or a custom command
-pixi run train [./config_file.yml]
-pixi run [-e dev] python main.py
-# Or activate the env in the shell (optionally specify the environment)
-pixi shell [-e dev]
-python main.py
 ```
 
 Old installation procedure is detailed in [INSTALL.md](docs/INSTALL.md).
@@ -202,32 +199,34 @@ Old installation procedure is detailed in [INSTALL.md](docs/INSTALL.md).
 ## Data preparation
 Please follow the instructions at [DATASETS.md](docs/DATASETS.md) to prepare all datasets.
 
-# Training 
-For all experiments shown in above tables, we provide config files in `configs` folder. For example, to train ViFi-CLIP (tunes both image and text encoder) on Kinetics-400, run the following command:
+## Training
+For all experiments shown in the above tables, we provide config files in `configs` folder. For example, to train ViFi-CLIP (tunes both image and text encoder) on Kinetics-400, run the following command:
 ```
-python -m torch.distributed.launch --nproc_per_node=8 \ 
-main.py -cfg configs/fully_supervised/k400/16_16_vifi_clip.yaml --output /PATH/TO/OUTPUT 
+torchrun --nproc_per_node=8 main.py --config configs/fully_supervised/k400/16_16_vifi_clip.yaml --output /PATH/TO/OUTPUT 
 ```
 
 **Note:**
-- We recommend keeping the total batch size as mentioned in respective config files. Please use `--accumulation-steps` to maintain the total batch size. Specifically, here the effective total batch size is 8(`GPUs_NUM`) x 4(`TRAIN.BATCH_SIZE`) x 16(`TRAIN.ACCUMULATION_STEPS`) = 512.
-- After setting up the datasets as instructed [DATASETS.md](docs/DATASETS.md), only argument in the config file that should be specified is data path. All other settings in config files are pre-set.
+- We recommend keeping the total batch size as mentioned in the respective config files. Please use `--accumulation-steps` to maintain the total batch size. Specifically, here the effective total batch size is 8(`GPUs_NUM`) x 4(`TRAIN.BATCH_SIZE`) x 16(`TRAIN.ACCUMULATION_STEPS`) = 512.
+- After setting up the datasets as instructed [DATASETS.md](docs/DATASETS.md), the only argument in the config file that should be specified is data path. All other settings in config files are pre-set.
+- If you want to train ViFi-CLIP with different number of frames, please change the `TRAIN.NUM_FRAMES` argument in the config file. For example, to train ViFi-CLIP with 8 frames, set `DATA.NUM_FRAMES` to 8 in the config file.
+- If you want to use MLflow for model versioning, please use the `--mlflow` argument in the command. For example, to train ViFi-CLIP with MLflow, run:
+```
+torchrun --nproc_per_node=8 main.py --config configs/fully_supervised/k400/16_16_vifi_clip.yaml --output /PATH/TO/OUTPUT --mlflow
+```
 
-For detailed training instructions for all experimental setup, please refer to [TRAIN.md](docs/TRAIN.md).
+For detailed training instructions for all experimental setups, please refer to [TRAIN.md](docs/TRAIN.md).
 
-# Evaluating models
+## Evaluating models
 To evaluate a model, please use a suitable config and corresponding model weights. For example, to evaluate ViFi-CLIP with 16 frames on Kinetics-400, run the command below:
 ```
-python -m torch.distributed.launch --nproc_per_node=8 main.py \
--cfg configs/fully_supervised/k400/16_16_vifi_clip.yaml --output /PATH/TO/OUTPUT \
---only_test --resume /PATH/TO/CKPT --opts TEST.NUM_CLIP 4 TEST.NUM_CROP 3
+torchrun --nproc_per_node=8 main.py --config configs/fully_supervised/k400/16_16_vifi_clip.yaml --output /PATH/TO/OUTPUT --only_test --resume /PATH/TO/CKPT --opts TEST.NUM_CLIP 4 TEST.NUM_CROP 3
 ```
 
 ## Contact
-If you have any questions, please create an issue on this repository or contact at uzair.khattak@mbzuai.ac.ae or hanoona.bangalath@mbzuai.ac.ae .
+If you have any questions, please create an issue in this repository or contact at uzair.khattak@mbzuai.ac.ae or hanoona.bangalath@mbzuai.ac.ae or matteo.cacciola@gmail.com.
 
 
-# Citation
+## Citation
 If you use our approach (code, model or dataset splits) in your research, please consider citing:
 ```
 @inproceedings{hanoonavificlip,
@@ -238,5 +237,5 @@ If you use our approach (code, model or dataset splits) in your research, please
 }
 ```
 
-# Acknowledgements
+## Acknowledgements
 Our code is based on [XCLIP's repository](https://github.com/microsoft/VideoX/tree/master/X-CLIP). We sincerely thank the authors for releasing their code. If you use our model and code, please consider citing XCLIP as well.

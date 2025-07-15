@@ -32,16 +32,22 @@ def set_weight_decay(model, skip_list=(), skip_keywords=(), weight_decay=0.001, 
         else:
             has_decay.append(param)
 
-    return [{'params': has_decay, 'weight_decay': weight_decay, 'lr': lr},
-            {'params': no_decay, 'weight_decay': 0., 'lr': lr}]
+    return [
+        {'params': has_decay, 'weight_decay': weight_decay, 'lr': lr},
+        {'params': no_decay, 'weight_decay': 0., 'lr': lr}
+    ]
 
 
 def build_optimizer(config, model):
     model = model.module if hasattr(model, 'module') else model
 
-    optimizer = optim.AdamW(model.parameters(), lr=config.TRAIN.LR,
-                            weight_decay=config.TRAIN.WEIGHT_DECAY,
-                            betas=(0.9, 0.98), eps=1e-8, )
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=config.TRAIN.LR,
+        weight_decay=config.TRAIN.WEIGHT_DECAY,
+        betas=(0.9, 0.98),
+        eps=1e-8,
+    )
 
     return optimizer
 
