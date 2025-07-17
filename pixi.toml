@@ -6,8 +6,8 @@ platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks.train]
-args = [{ "arg" = "config", "default" = "../data/movyon/config_vificlip_with_freeze.yml" }]
-cmd = "torchrun main.py --with-mlflow --local_rank=0 --config {{ config }}"
+args = [{ "arg" = "config", "default" = "./configs/dangers_5_with_freeze.yml" }]
+cmd = "torchrun main.py --mlflow --local_rank=0 --config {{ config }}"
 
 [system-requirements]
 cuda = "12.0"

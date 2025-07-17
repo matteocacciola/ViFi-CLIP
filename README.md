@@ -10,6 +10,7 @@ Please, check the [Training](#Training) section for more details on how to use M
 
 ###  Pixi commands
 Pixi is a package manager that helps to manage the environment and run tasks. It is used in this repository to manage dependencies and run training or evaluation tasks.
+
 You can use the following commands to run tasks in this repository:
 ```bash
 # Directly run a task specified in the pixi.toml or a custom command
@@ -18,6 +19,51 @@ pixi run [-e dev] python main.py
 # Or activate the env in the shell (optionally specify the environment)
 pixi shell [-e dev]
 python main.py
+```
+---
+
+## Installation 
+For installation and other package requirements, please follow the following instructions:
+
+```bash
+# Install pixi package manager (https://pixi.sh/latest/installation/)
+curl -fsSL https://pixi.sh/install.sh | sh
+
+# Install dependencies for production: (default) environment
+pixi install
+# Or install also the development dependencies (dev) environment
+pixi install -e dev
+```
+
+Old installation procedure is detailed in [INSTALL.md](docs/INSTALL.md).
+
+## Data preparation
+Please follow the instructions at [DATASETS.md](docs/DATASETS.md) to prepare all datasets.
+
+## Training
+The `configs` folder contains the configurations to be used and some example configs from the original repository.
+These condifgurations refer to a `LABEL_LIST` pointing to a file in the `labels` folder, which defines the categories of the dataset as strings that will be used to generate the base CLIP embeddings.
+
+For example, to finetune ViFi-CLIP (tunes both image and text encoder) on the 5 basic road dangers categories, run the following command:
+```bash
+pixi run train ./configs/dangers_5_with_freeze.yml
+```
+
+**Note:**
+- We recommend keeping the total batch size as mentioned in the respective config files. Please use `--accumulation-steps` to maintain the total batch size. Specifically, here the effective total batch size is 8(`GPUs_NUM`) x 4(`TRAIN.BATCH_SIZE`) x 16(`TRAIN.ACCUMULATION_STEPS`) = 512.
+- After setting up the datasets as instructed [DATASETS.md](docs/DATASETS.md), the only argument in the config file that should be specified is data path. All other settings in config files are pre-set.
+- If you want to train ViFi-CLIP with different number of frames, please change the `TRAIN.NUM_FRAMES` argument in the config file. For example, to train ViFi-CLIP with 8 frames, set `DATA.NUM_FRAMES` to 8 in the config file.
+- If you want to use MLflow for model versioning, please use the `--mlflow` argument in the command. For example, to train ViFi-CLIP with MLflow, run:
+```
+torchrun --nproc_per_node=8 main.py --config configs/fully_supervised/k400/16_16_vifi_clip.yaml --output /PATH/TO/OUTPUT --mlflow
+```
+
+For detailed training instructions for all experimental setups, please refer to [TRAIN.md](docs/TRAIN.md).
+
+## Evaluating models
+To evaluate a model, please use a suitable config and corresponding model weights. For example, to evaluate ViFi-CLIP with 16 frames on Kinetics-400, run the command below:
+```
+torchrun --nproc_per_node=8 main.py --config configs/fully_supervised/k400/16_16_vifi_clip.yaml --output /PATH/TO/OUTPUT --only_test --resume /PATH/TO/CKPT --opts TEST.NUM_CLIP 4 TEST.NUM_CROP 3
 ```
 
 ---
@@ -181,46 +227,6 @@ ViFi-CLIP is first trained on K400 and then vision and language prompts are furt
 | [CLIP text-FT](configs/fully_supervised/k400/16_16_text_tuned_clip.yaml)   |   281    | 16x224 |    73.1    |    91.2    | [link](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EeKqDguvX8NPvz5MIKmVPBIBLxL0wkzh0SCmpfs8ZebdZQ?e=2mKBTr) |
 | [ViFi-CLIP](configs/fully_supervised/k400/16_16_vifi_clip.yaml)            |   281    | 16x224 |    83.9    |    96.3    | [link](https://mbzuaiac-my.sharepoint.com/:u:/g/personal/uzair_khattak_mbzuai_ac_ae/EfqisYTGKlVIiPI0QHG-pxMBuBMA0906jX_kPpaRGw9Ksw?e=TdbaBU) |
 
-## Installation 
-For installation and other package requirements, please follow the following instructions:
-
-```bash
-# Install pixi package manager (https://pixi.sh/latest/installation/)
-curl -fsSL https://pixi.sh/install.sh | sh
-
-# Install dependencies for production: (default) environment
-pixi install
-# Or install also the development dependencies (dev) environment
-pixi install -e dev
-```
-
-Old installation procedure is detailed in [INSTALL.md](docs/INSTALL.md).
-
-## Data preparation
-Please follow the instructions at [DATASETS.md](docs/DATASETS.md) to prepare all datasets.
-
-## Training
-For all experiments shown in the above tables, we provide config files in `configs` folder. For example, to train ViFi-CLIP (tunes both image and text encoder) on Kinetics-400, run the following command:
-```
-torchrun --nproc_per_node=8 main.py --config configs/fully_supervised/k400/16_16_vifi_clip.yaml --output /PATH/TO/OUTPUT 
-```
-
-**Note:**
-- We recommend keeping the total batch size as mentioned in the respective config files. Please use `--accumulation-steps` to maintain the total batch size. Specifically, here the effective total batch size is 8(`GPUs_NUM`) x 4(`TRAIN.BATCH_SIZE`) x 16(`TRAIN.ACCUMULATION_STEPS`) = 512.
-- After setting up the datasets as instructed [DATASETS.md](docs/DATASETS.md), the only argument in the config file that should be specified is data path. All other settings in config files are pre-set.
-- If you want to train ViFi-CLIP with different number of frames, please change the `TRAIN.NUM_FRAMES` argument in the config file. For example, to train ViFi-CLIP with 8 frames, set `DATA.NUM_FRAMES` to 8 in the config file.
-- If you want to use MLflow for model versioning, please use the `--mlflow` argument in the command. For example, to train ViFi-CLIP with MLflow, run:
-```
-torchrun --nproc_per_node=8 main.py --config configs/fully_supervised/k400/16_16_vifi_clip.yaml --output /PATH/TO/OUTPUT --mlflow
-```
-
-For detailed training instructions for all experimental setups, please refer to [TRAIN.md](docs/TRAIN.md).
-
-## Evaluating models
-To evaluate a model, please use a suitable config and corresponding model weights. For example, to evaluate ViFi-CLIP with 16 frames on Kinetics-400, run the command below:
-```
-torchrun --nproc_per_node=8 main.py --config configs/fully_supervised/k400/16_16_vifi_clip.yaml --output /PATH/TO/OUTPUT --only_test --resume /PATH/TO/CKPT --opts TEST.NUM_CLIP 4 TEST.NUM_CROP 3
-```
 
 ## Contact
 If you have any questions, please create an issue in this repository or contact at uzair.khattak@mbzuai.ac.ae or hanoona.bangalath@mbzuai.ac.ae or matteo.cacciola@gmail.com.

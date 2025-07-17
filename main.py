@@ -15,11 +15,15 @@ import time
 import numpy as np
 import random
 from torch.amp import GradScaler, autocast
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
+from timm.loss.cross_entropy import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from datasets.blending import CutmixMixupBlending
 from utils.config import get_config
 from trainers import vificlip
 import cv2
+
+import mlflow
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.utils.multiclass import unique_labels
 
 
 def parse_option():
@@ -31,7 +35,7 @@ def parse_option():
         default=None,
         nargs='+',
     )
-    parser.add_argument('--output', type=str, default='exp')
+    parser.add_argument('--output', type=str, default=None)
     parser.add_argument('--resume', type=str)
     parser.add_argument('--pretrained', type=str)
     parser.add_argument('--only_test', action='store_true')
@@ -53,12 +57,7 @@ def parse_option():
 
 
 def main_mlflow():
-    import mlflow
-    import mlflow.pytorch
-    from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix, ConfusionMatrixDisplay
-    from sklearn.utils.multiclass import unique_labels
-
-    mlflow.set_tracking_uri('file:./mlflow_logs')
+    mlflow.set_tracking_uri(Path(config.OUTPUT) / 'mlflow_logs')
     mlflow.set_experiment(args.experiment_name)
 
     if args.run_name is None:
@@ -216,7 +215,7 @@ def model_epoch_saving(epoch, model, optimizer, lr_scheduler, acc1, precision, r
     logger.info(
         'Val acc: {:.2f}%, Precision: {:.2f}, Recall: {:.2f}, F1: {:.2f}'.format(acc1, precision, recall, f1)
     )
-    is_best = acc1 > max_accuracy
+    is_best = acc1 >= max_accuracy
     max_accuracy = max(max_accuracy, acc1)
 
     if dist.get_rank() == 0 and is_best:
@@ -291,7 +290,7 @@ def train_one_epoch(epoch, model, criterion, optimizer, lr_scheduler, train_load
     return tot_loss_meter.avg
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def validate(val_loader, model, config, return_preds=False):
     model.eval()
 
@@ -353,6 +352,10 @@ if __name__ == '__main__':
     # prepare config
     args, config = parse_option()
 
+    # Define the output run dir
+    config.OUTPUT = str(Path(config.OUTPUT) / datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    
+
     if args.validate_videos:
         logger = create_logger(output_dir=config.OUTPUT, dist_rank=0, name='{}'.format(config.MODEL.ARCH))
         logger.info('Validating video files in {}'.format(config.DATA.ROOT))
@@ -397,4 +400,5 @@ if __name__ == '__main__':
 
     if args.mlflow:
         main_mlflow()
-    main()
+    else:
+        main()

@@ -50,8 +50,11 @@ pgdata/
 # datasets
 datasets/
 
-
+# logs
 mlflow_logs/
+.output/
+runs/
+exp/
 
 # pixi environments
 .pixi
