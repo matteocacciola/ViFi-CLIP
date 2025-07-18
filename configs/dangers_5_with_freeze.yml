@@ -32,7 +32,7 @@ TRAINER:
   ViFi_CLIP:
     USE: custom_freeze
 
-OUTPUT: 'runs'
+OUTPUT: '.runs'
 SAVE_FREQ: 1
 PRINT_FREQ: 50
 SEED: 42

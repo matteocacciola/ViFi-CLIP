@@ -53,7 +53,7 @@ datasets/
 # logs
 mlflow_logs/
 .output/
-runs/
+.runs/
 exp/
 
 # pixi environments

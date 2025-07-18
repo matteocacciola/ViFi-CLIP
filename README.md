@@ -48,6 +48,8 @@ For example, to finetune ViFi-CLIP (tunes both image and text encoder) on the 5 
 ```bash
 pixi run train ./configs/dangers_5_with_freeze.yml
 ```
+### ONNX models
+At the end of the training, in the output folder (default: `.runs/Y-m-d_H-M-S/`) there will be an `onnx` folder containing the best checkpoint in the ONNX format. The content of the folder can be placed in the corresponding checkpoint directory in the inference pipeline project to be used as model.
 
 **Note:**
 - We recommend keeping the total batch size as mentioned in the respective config files. Please use `--accumulation-steps` to maintain the total batch size. Specifically, here the effective total batch size is 8(`GPUs_NUM`) x 4(`TRAIN.BATCH_SIZE`) x 16(`TRAIN.ACCUMULATION_STEPS`) = 512.

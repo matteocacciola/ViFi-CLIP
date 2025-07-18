@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 import yaml
 from yacs.config import CfgNode as CN
@@ -123,6 +124,8 @@ def update_config(config, args):
         config.TRAIN.ACCUMULATION_STEPS = args.accumulation_steps
     if args.output:
         config.OUTPUT = args.output
+    else:
+        config.OUTPUT = os.path.join(config.OUTPUT, datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     if args.only_test:
         config.TEST.ONLY_TEST = True
     # set local rank for distributed training

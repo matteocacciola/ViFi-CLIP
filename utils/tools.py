@@ -1,8 +1,15 @@
-import numpy
-import torch.distributed as dist
-import torch
-import clip
 import os
+from pathlib import Path
+import warnings
+
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch
+from torch.export import Dim
+import onnx
+from onnxconverter_common.auto_mixed_precision import auto_convert_mixed_precision
+
+import clip
 
 
 def reduce_tensor(tensor, n=None):
@@ -12,10 +19,11 @@ def reduce_tensor(tensor, n=None):
     dist.all_reduce(rt, op=dist.ReduceOp.SUM)
     rt = rt / n
     return rt
-   
+
 
 class AverageMeter:
     """Computes and stores the average and current value"""
+
     def __init__(self):
         self.reset()
 
@@ -30,7 +38,7 @@ class AverageMeter:
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
-    
+
     def sync(self):
         rank = dist.get_rank()
         world_size = dist.get_world_size()
@@ -43,28 +51,82 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
-def epoch_saving(config, epoch, model,  max_accuracy, optimizer, lr_scheduler, logger, working_dir, is_best):
+def epoch_saving(
+    config,
+    epoch,
+    model,
+    max_accuracy,
+    optimizer,
+    lr_scheduler,
+    logger,
+    working_dir,
+    is_best,
+):
     save_state = {
-        'model': model.state_dict(),
-        'optimizer': optimizer.state_dict(),
-        'lr_scheduler': lr_scheduler.state_dict(),
-        'max_accuracy': max_accuracy,
-        'epoch': epoch,
-        'config': config,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "lr_scheduler": lr_scheduler.state_dict(),
+        "max_accuracy": max_accuracy,
+        "epoch": epoch,
+        "config": config,
     }
-    
-    save_path = os.path.join(working_dir, f'ckpt_epoch_{epoch}.pth')
+
+    save_path = os.path.join(working_dir, f"ckpt_epoch_{epoch}.pth")
     logger.info(f"{save_path} saving......")
     torch.save(save_state, save_path)
     logger.info(f"{save_path} saved !!!")
     if is_best:
-        best_path = os.path.join(working_dir, 'best.pth')
+        best_path = os.path.join(working_dir, "best.pth")
         torch.save(save_state, best_path)
         logger.info(f"{best_path} saved !!!")
 
 
+@torch.inference_mode()
+def model_onnx_conversion(ddp_model: DDP, working_dir: Path):
+    model = ddp_model.module.eval()
+    working_dir = working_dir / "onnx"
+    working_dir.mkdir(parents=True, exist_ok=True)
+    model_path = working_dir / "model.onnx"
+
+    input = (torch.randn(2, 32, 3, 224, 224, device="cuda"),)
+
+    torch.onnx.export(
+        model,
+        input,
+        model_path,
+        input_names=["video"],
+        output_names=["logits"],
+        dynamic_shapes=[
+            (Dim("batch"), Dim("frames"), Dim.STATIC, Dim.STATIC, Dim.STATIC)
+        ],
+        dynamo=True,
+    )
+
+    onnx_model = onnx.load(model_path)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # Suppress UserWarnings
+        model_fp16 = auto_convert_mixed_precision(
+            onnx_model,
+            {"video": input[0].numpy(force=True)},
+            rtol=0.01,
+            atol=0.001,
+            keep_io_types=True,
+        )
+
+    model_fp16_path = model_path.with_stem("model_fp16")
+    onnx.save(model_fp16, model_fp16_path, save_as_external_data=True, location=f"{model_fp16_path.name}.data")
+
+
+def load_model_checkpoint(model, checkpoint, logger):
+    checkpoint = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state_dict = checkpoint["model"]
+    msg = model.load_state_dict(state_dict, strict=False)
+    logger.info(f"Resume model: {msg}")
+
+
 def load_checkpoint(config, model, optimizer, lr_scheduler, logger):
-    if os.path.isfile(config.MODEL.RESUME): 
+    if os.path.isfile(config.MODEL.RESUME):
         logger.info(f"==============> Resuming form {config.MODEL.RESUME}....................")
         checkpoint = torch.load(config.MODEL.RESUME, map_location='cpu')
         load_state_dict = checkpoint['model']
@@ -90,7 +152,7 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, logger):
             max_accuracy = checkpoint['max_accuracy']
 
             logger.info(f"=> loaded successfully '{config.MODEL.RESUME}' (epoch {checkpoint['epoch']})")
-            
+
             del checkpoint
             torch.cuda.empty_cache()
 
@@ -98,7 +160,7 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, logger):
         except:
             del checkpoint
             torch.cuda.empty_cache()
-            return 0, 0.
+            return 0, 0.0
 
     else:
         logger.info(("=> no checkpoint found at '{}'".format(config.MODEL.RESUME)))

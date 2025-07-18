@@ -3,12 +3,13 @@ import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 import datetime
 import shutil
 from pathlib import Path
 from utils.optimizer import build_optimizer, build_scheduler
-from utils.tools import AverageMeter, epoch_saving, load_checkpoint, auto_resume_helper
+from utils.tools import AverageMeter, epoch_saving, load_checkpoint, auto_resume_helper, load_model_checkpoint, model_onnx_conversion
 from datasets.build import build_dataloader
 from utils.logger import create_logger
 import time
@@ -130,6 +131,9 @@ def main_mlflow():
 
             multiview_inference(model)
 
+        load_model_checkpoint(model, Path(config.OUTPUT) / "best.pth", logger)
+        model_onnx_conversion(model, Path(config.OUTPUT))
+
     if dist.is_initialized():
         dist.destroy_process_group()
 
@@ -181,9 +185,7 @@ def setup():
     optimizer = build_optimizer(config, model)
     lr_scheduler = build_scheduler(config, optimizer, len(train_loader))
 
-    model = torch.nn.parallel.DistributedDataParallel(
-        model, device_ids=[config.LOCAL_RANK], broadcast_buffers=False, find_unused_parameters=False
-    )
+    model = DDP(model, device_ids=[config.LOCAL_RANK], broadcast_buffers=False, find_unused_parameters=False)
 
     start_epoch, max_accuracy = 0, 0.0
 
@@ -222,6 +224,8 @@ def model_epoch_saving(epoch, model, optimizer, lr_scheduler, acc1, precision, r
         epoch_saving(
             config, epoch, model, max_accuracy, optimizer, lr_scheduler, logger, config.OUTPUT, is_best
         )
+    dist.barrier(device_ids=[args.local_rank])
+
 
 
 def multiview_inference(model):
@@ -351,11 +355,7 @@ def validate_videos(dataset_path):
 if __name__ == '__main__':
     # prepare config
     args, config = parse_option()
-
-    # Define the output run dir
-    config.OUTPUT = str(Path(config.OUTPUT) / datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     
-
     if args.validate_videos:
         logger = create_logger(output_dir=config.OUTPUT, dist_rank=0, name='{}'.format(config.MODEL.ARCH))
         logger.info('Validating video files in {}'.format(config.DATA.ROOT))
