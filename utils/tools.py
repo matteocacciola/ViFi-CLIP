@@ -1,3 +1,4 @@
+from logging import Logger
 import os
 from pathlib import Path
 import warnings
@@ -82,7 +83,7 @@ def epoch_saving(
 
 
 @torch.inference_mode()
-def model_onnx_conversion(ddp_model: DDP, working_dir: Path):
+def model_onnx_conversion(ddp_model: DDP, working_dir: Path, logger: Logger):
     model = ddp_model.module.eval()
     working_dir = working_dir / "onnx"
     working_dir.mkdir(parents=True, exist_ok=True)
@@ -116,7 +117,7 @@ def model_onnx_conversion(ddp_model: DDP, working_dir: Path):
 
     model_fp16_path = model_path.with_stem("model_fp16")
     onnx.save(model_fp16, model_fp16_path, save_as_external_data=True, location=f"{model_fp16_path.name}.data")
-
+    logger.info(f"ONNX models saved in {model_path.parent}")
 
 def load_model_checkpoint(model, checkpoint, logger):
     checkpoint = torch.load(checkpoint, map_location="cpu", weights_only=False)

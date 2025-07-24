@@ -51,7 +51,7 @@ pgdata/
 datasets/
 
 # logs
-mlflow_logs/
+.mlflow_logs/
 .output/
 .runs/
 exp/
