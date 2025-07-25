@@ -1,4 +1,3 @@
-import copy
 import torch.optim as optim
 from timm.scheduler.cosine_lr import CosineLRScheduler
 import torch.distributed as dist
@@ -56,6 +55,7 @@ def build_scheduler(config, optimizer, n_iter_per_epoch):
     num_steps = int(config.TRAIN.EPOCHS * n_iter_per_epoch)
     warmup_steps = int(config.TRAIN.WARMUP_EPOCHS * n_iter_per_epoch)
 
+    # TODO: Replace with torch.OneCycleLR
     lr_scheduler = CosineLRScheduler(
         optimizer,
         t_initial=num_steps,

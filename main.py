@@ -186,7 +186,6 @@ class ViFiCLIPTrainer:
     def _init_optimizer(self):
         """Initialize optimizer and learning rate scheduler."""
         self.optimizer = build_optimizer(self.config, self.model)
-        # TODO: fix number of steps
         self.lr_scheduler = build_scheduler(
             self.config, self.optimizer, len(self.train_loader)
         )
@@ -520,7 +519,7 @@ class ViFiCLIPTrainer:
 
             fig.tight_layout()
 
-            fig_path = "confusion_matrices/{epoch}.png"
+            fig_path = f"confusion_matrices/{epoch}.png"
             mlflow.log_figure(fig, fig_path)
             plt.close(fig)
 
