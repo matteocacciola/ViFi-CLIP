@@ -1,11 +1,11 @@
 DATA:
-  ROOT: ../data/dataset
-  TRAIN_FILE: ../data/dangers_5/dangers_5_train.txt
-  VAL_FILE: ../data/dangers_5/dangers_5_val.txt
+  ROOT: '../data/dataset'
+  TRAIN_FILE: '../data/train.txt'
+  VAL_FILE: '../data/val.txt'
   DATASET: 'movyon'
   INPUT_SIZE: 224
   NUM_FRAMES: 32
-  LABEL_LIST: ../data/dangers_5/class_names.csv
+  LABEL_LIST: 'labels/dangers_3.csv'
 
 MODEL:
   ARCH: 'ViT-B/16'
@@ -15,12 +15,17 @@ MODEL:
   FIX_TEXT: true
 
 TRAIN:
-  EPOCHS: 100
-  WARMUP_EPOCHS: 10
+  EPOCHS: 50
+  WARMUP_EPOCHS: 5
+  WEIGHT_DECAY: 0.001
   LR: 5e-5
-  BATCH_SIZE: 8
+  BATCH_SIZE: 4
   ACCUMULATION_STEPS: 2
   BEST_METRIC: f1
+
+TRAINER:
+  ViFi_CLIP:
+    USE: custom_freeze
 
 OUTPUT: '.runs'
 SAVE_FREQ: 25

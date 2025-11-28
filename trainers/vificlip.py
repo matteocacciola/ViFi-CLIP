@@ -1,16 +1,9 @@
-import os.path as osp
-from collections import OrderedDict
-import math
+from logging import Logger
 
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-from torch.cuda.amp import GradScaler, autocast
 
 from clip import clip
-from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
-
-_tokenizer = _Tokenizer()
 
 
 def load_clip_to_cpu(cfg):
@@ -68,7 +61,7 @@ class VLPromptLearner(nn.Module):
         ctx_init = cfg.TRAINER.ViFi_CLIP.CTX_INIT
         ZS_evaluation = cfg.TRAINER.ViFi_CLIP.ZS_EVAL
         if ZS_evaluation:
-            text_aug = f'{{}}'
+            text_aug = '{{}}'
             tokenized_prompts = torch.cat([clip.tokenize(text_aug.format(c), context_length=77) for c in classnames])
             embedding = clip_model.token_embedding(tokenized_prompts).to(clip_dtype)
             self.register_buffer('complete_text_embeddings', embedding)
@@ -197,16 +190,19 @@ class ViFiCLIP(nn.Module):
         return logits
 
 
-def returnCLIP(config, logger=None,
+def returnCLIP(config, logger: Logger | None =None,
                class_names=None):
-    logger.info(f'Loading CLIP (backbone: {config.MODEL.ARCH})')
+    if logger:
+        logger.info(f'Loading CLIP (backbone: {config.MODEL.ARCH})')
     clip_model = load_clip_to_cpu(config)
 
-    logger.info('Building ViFi-CLIP CLIP')
+    if logger:
+        logger.info('Building ViFi-CLIP CLIP')
     model = ViFiCLIP(config, class_names, clip_model, logger)
 
     if config.TRAINER.ViFi_CLIP.PROMPT_MODEL:
-        logger.info('Turning off gradients in both the image and the text encoder')
+        if logger:
+            logger.info('Turning off gradients in both the image and the text encoder')
         name_to_update = 'prompt_learner'
         for name, param in model.named_parameters():
             if name_to_update not in name:
@@ -219,25 +215,29 @@ def returnCLIP(config, logger=None,
         # Now need to control freezing of CLIP for fine-tuning
         train_complete_clip = config.TRAINER.ViFi_CLIP.USE
         if train_complete_clip == 'both':
-            logger.info('Turning on gradients for COMPLETE ViFi-CLIP model')
+            if logger:
+                logger.info('Turning on gradients for COMPLETE ViFi-CLIP model')
             for name, param in model.named_parameters():
                 param.requires_grad_(True)
         elif train_complete_clip == 'image':
-            logger.info('Turning on gradients for image side the ViFi-CLIP model')
+            if logger:
+                logger.info('Turning on gradients for image side the ViFi-CLIP model')
             for name, param in model.named_parameters():
                 if 'image_encoder' in name:  # replace by 'text_encoder' incase you want to freeze text
                     param.requires_grad_(True)
                 else:
                     param.requires_grad_(False)
         elif train_complete_clip == 'text':
-            logger.info('Turning on gradients for TEXT side the ViFi-CLIP model')
+            if logger:
+                logger.info('Turning on gradients for TEXT side the ViFi-CLIP model')
             for name, param in model.named_parameters():
                 if 'text_encoder' in name:  # replace by 'text_encoder' incase you want to freeze text
                     param.requires_grad_(True)
                 else:
                     param.requires_grad_(False)
         elif train_complete_clip == 'custom_freeze':  # Custom freezing for ViT-B/16
-            logger.info('Freezing all but the last two blocks of the Vision Transformer and the text encoder.')
+            if logger:
+                logger.info('Freezing all but the last two blocks of the Vision Transformer and the text encoder.')
             # Freeze all parameters initially
             for name, param in model.named_parameters():
                 param.requires_grad_(False)
@@ -248,28 +248,33 @@ def returnCLIP(config, logger=None,
             for i in range(num_blocks - 2, num_blocks):
                 for name, param in model.image_encoder.transformer.resblocks[i].named_parameters():
                     param.requires_grad_(True)
-                    logger.info(f'Unfreezing image_encoder.transformer.resblocks[{i}].{name}')
+                    if logger:
+                        logger.info(f'Unfreezing image_encoder.transformer.resblocks[{i}].{name}')
 
             # Unfreeze the text encoder
             for name, param in model.text_encoder.named_parameters():
                 param.requires_grad_(True)
-                logger.info(f'Unfreezing text_encoder.{name}')
+                if logger:
+                    logger.info(f'Unfreezing text_encoder.{name}')
 
             # Unfreeze the prompt_learner (if used)
             for name, param in model.prompt_learner.named_parameters():
                 param.requires_grad_(True)
-                logger.info(f'Unfreezing prompt_learner.{name}')
+                if logger:
+                 logger.info(f'Unfreezing prompt_learner.{name}')
 
             # Unfreeze logit_scale
             model.logit_scale.requires_grad_(True)
-            logger.info(f'Unfreezing logit_scale')
+            if logger:
+                logger.info('Unfreezing logit_scale')
 
     # Double check
     enabled = set()
     for name, param in model.named_parameters():
         if param.requires_grad:
             enabled.add(name)
-    logger.info(f'Parameters to be updated: {enabled}')
-    logger.info(f'Total learnable items: {len(enabled)}')
+    if logger:
+        logger.info(f'Parameters to be updated: {enabled}')
+        logger.info(f'Total learnable items: {len(enabled)}')
     model.float()
     return model

@@ -18,7 +18,6 @@ _C.DATA.VAL_FILE = ''
 _C.DATA.DATASET = 'kinetics400'
 _C.DATA.INPUT_SIZE = 224
 _C.DATA.NUM_FRAMES = 8
-_C.DATA.NUM_CLASSES = 400
 _C.DATA.LABEL_LIST = 'labels/kinetics_400_labels.csv'
 
 # -----------------------------------------------------------------------------
@@ -61,6 +60,7 @@ _C.TRAIN.OPTIMIZER = 'adamw'
 _C.TRAIN.OPT_LEVEL = 'O1'
 _C.TRAIN.AUTO_RESUME = False
 _C.TRAIN.USE_CHECKPOINT = False
+_C.TRAIN.BEST_METRIC = 'loss'
 
 # -----------------------------------------------------------------------------
 # Augmentation settings

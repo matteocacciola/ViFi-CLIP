@@ -1,9 +1,22 @@
+from dataclasses import dataclass, field
 from logging import Logger
 import os
 from pathlib import Path
 import warnings
 
+import pandas as pd
+
+from torcheval.metrics.toolkit import sync_and_compute
+from torcheval.metrics import (
+    Metric,
+    Mean,
+    MulticlassAccuracy,
+    MulticlassPrecision,
+    MulticlassRecall,
+    MulticlassF1Score,
+)
 import torch.distributed as dist
+from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
 from torch.export import Dim
@@ -11,6 +24,187 @@ import onnx
 from onnxconverter_common.auto_mixed_precision import auto_convert_mixed_precision
 
 import clip
+
+
+@dataclass
+class ValidationMetrics:
+    """Container for validation metrics."""
+
+    loss: float = float("inf")
+    accuracy: float = 0.0
+    precision: float = 0.0
+    recall: float = 0.0
+    f1: float = 0.0
+
+    classes: list[str] = field(default_factory=list)
+    per_class_precision: list[float] = field(default_factory=list)
+    per_class_recall: list[float] = field(default_factory=list)
+    per_class_f1: list[float] = field(default_factory=list)
+    per_class_accuracy: list[float] = field(default_factory=list)
+
+    def is_better_than(self, other: "ValidationMetrics", metric: str = "loss") -> bool:
+        """Check if current metrics are better than another set."""
+        if metric == "loss":
+            return self.loss < other.loss
+        elif hasattr(self, metric):
+            return getattr(self, metric) > getattr(other, metric)
+        else:
+            raise ValueError(f"Unknown metric: {metric}")
+
+    def __str__(self) -> str:
+        return (
+            f"Loss: {self.loss:.4f}, Acc: {self.accuracy:.3f}, "
+            f"P: {self.precision:.3f}, R: {self.recall:.3f}, F1: {self.f1:.3f}"
+        )
+    
+    def to_dataframe(self) -> pd.DataFrame:
+        """
+        Convert metrics to a DataFrame with per-class rows + macro avg row.
+        
+        Returns:
+            DataFrame with columns: ['class', 'accuracy', 'precision', 'recall', 'f1']
+        """
+        rows = []
+        
+        # Add per-class rows
+        for i, class_name in enumerate(self.classes):
+            rows.append({
+                'class': class_name,
+                'accuracy': self.per_class_accuracy[i],
+                'precision': self.per_class_precision[i],
+                'recall': self.per_class_recall[i],
+                'f1': self.per_class_f1[i],
+            })
+        
+        # Add macro average row
+        rows.append({
+            'class': 'macro avg',
+            'accuracy': self.accuracy,
+            'precision': self.precision,
+            'recall': self.recall,
+            'f1': self.f1,
+        })
+        
+        df = pd.DataFrame(rows)
+        df = df.set_index('class')
+
+        return df
+
+    def to_table(self) -> str:
+        """Convert metrics to a table string using DataFrame."""
+        df = self.to_dataframe()
+        return df.to_string(float_format='%.4f')
+    
+    def save_to_csv(self, filepath: Path):
+        """Save metrics to CSV file using DataFrame."""
+        df = self.to_dataframe()
+        df.to_csv(filepath, float_format='%.4f')
+
+
+def compute(metric: Metric):
+    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        return sync_and_compute(metric)
+    return metric.compute()
+
+class ValidationMeter:
+    def __init__(self, classes: list[str]) -> None:
+        self.classes = classes
+        self.n_classes = len(self.classes)
+        self.loss_meter = Mean()
+        self.acc_meter = MulticlassAccuracy(average="macro", num_classes=self.n_classes)
+        self.p_meter = MulticlassPrecision(average="macro", num_classes=self.n_classes)
+        self.r_meter = MulticlassRecall(average="macro", num_classes=self.n_classes)
+        self.f1_meter = MulticlassF1Score(average="macro", num_classes=self.n_classes)
+
+        # Per-class metrics (no averaging)
+        self.p_meter_per_class = MulticlassPrecision(average=None, num_classes=self.n_classes)
+        self.r_meter_per_class = MulticlassRecall(average=None, num_classes=self.n_classes)
+        self.f1_meter_per_class = MulticlassF1Score(average=None, num_classes=self.n_classes)
+        self.acc_meter_per_class = MulticlassAccuracy(average=None, num_classes=self.n_classes)
+
+    @property
+    def loss(self):
+        return compute(self.loss_meter).item()
+
+    @property
+    def accuracy(self):
+        return compute(self.acc_meter).item()
+
+    @property
+    def precision(self):
+        return compute(self.p_meter).item()
+
+    @property
+    def recall(self):
+        return compute(self.r_meter).item()
+
+    @property
+    def f1(self):
+        return compute(self.f1_meter).item()
+
+    def update_loss(self, loss, n_samples):
+        self.loss_meter.update(loss.cpu(), weight=n_samples)
+
+    def update(self, inputs: torch.Tensor, target: torch.Tensor):
+        inputs = inputs.cpu()
+        target = target.cpu()
+
+        # Update aggregate metrics
+        self.acc_meter.update(inputs, target)
+        self.p_meter.update(inputs, target)
+        self.r_meter.update(inputs, target)
+        self.f1_meter.update(inputs, target)
+        # Update per-class metrics
+        self.p_meter_per_class.update(inputs, target)
+        self.r_meter_per_class.update(inputs, target)
+        self.f1_meter_per_class.update(inputs, target)
+        self.acc_meter_per_class.update(inputs, target)
+
+    def reset(self):
+        """Reset all internal meters."""
+        self.loss_meter.reset()
+        self.acc_meter.reset()
+        self.p_meter.reset()
+        self.r_meter.reset()
+        self.f1_meter.reset()
+        self.p_meter_per_class.reset()
+        self.r_meter_per_class.reset()
+        self.f1_meter_per_class.reset()
+        self.acc_meter_per_class.reset()
+
+
+    def get_val_metrics(self) -> ValidationMetrics:
+        """Compute current metrics and return a ValidationMetrics object."""
+        return ValidationMetrics(
+            loss=self.loss,
+            accuracy=self.accuracy,
+            precision=self.precision,
+            recall=self.recall,
+            f1=self.f1,
+            classes=self.classes,
+            per_class_accuracy=compute(self.acc_meter_per_class).tolist(),
+            per_class_precision=compute(self.p_meter_per_class).tolist(),
+            per_class_recall=compute(self.r_meter_per_class).tolist(),
+            per_class_f1=compute(self.f1_meter_per_class).tolist(),
+        )
+    
+class TimeMeter:
+    def __init__(self) -> None:
+        self.data_meter = Mean()
+        self.batch_meter = Mean()
+        
+    @property
+    def data_time(self):
+        return compute(self.data_meter).item()
+
+    @property
+    def batch_time(self):
+        return compute(self.batch_meter).item()
+    
+    def reset(self):
+        """Reset all internal meters."""
+        self.data_meter.reset()
+        self.batch_meter.reset()
 
 
 def reduce_tensor(tensor, n=None):
@@ -52,16 +246,14 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
-def epoch_saving(
+def save_checkpoint(
     config,
     epoch,
     model,
     max_accuracy,
     optimizer,
     lr_scheduler,
-    logger,
-    working_dir,
-    is_best,
+    save_path: Path,
 ):
     save_state = {
         "model": model.state_dict(),
@@ -71,19 +263,11 @@ def epoch_saving(
         "epoch": epoch,
         "config": config,
     }
-
-    save_path = os.path.join(working_dir, f"ckpt_epoch_{epoch}.pth")
-    logger.info(f"{save_path} saving......")
     torch.save(save_state, save_path)
-    logger.info(f"{save_path} saved !!!")
-    if is_best:
-        best_path = os.path.join(working_dir, "best.pth")
-        torch.save(save_state, best_path)
-        logger.info(f"{best_path} saved !!!")
 
 
 @torch.inference_mode()
-def model_onnx_conversion(ddp_model: DDP, working_dir: Path, logger: Logger):
+def export_onnx(ddp_model: DDP, working_dir: Path, logger: Logger):
     model = ddp_model.module.eval()
     working_dir = working_dir / "onnx"
     working_dir.mkdir(parents=True, exist_ok=True)
@@ -116,10 +300,16 @@ def model_onnx_conversion(ddp_model: DDP, working_dir: Path, logger: Logger):
         )
 
     model_fp16_path = model_path.with_stem("model_fp16")
-    onnx.save(model_fp16, model_fp16_path, save_as_external_data=True, location=f"{model_fp16_path.name}.data")
+    onnx.save(
+        model_fp16,
+        model_fp16_path,
+        save_as_external_data=True,
+        location=f"{model_fp16_path.name}.data",
+    )
     logger.info(f"ONNX models saved in {model_path.parent}")
 
-def load_model_checkpoint(model, checkpoint, logger):
+
+def load_model_checkpoint(model: nn.Module, checkpoint, logger):
     checkpoint = torch.load(checkpoint, map_location="cpu", weights_only=False)
     state_dict = checkpoint["model"]
     msg = model.load_state_dict(state_dict, strict=False)
@@ -128,9 +318,11 @@ def load_model_checkpoint(model, checkpoint, logger):
 
 def load_checkpoint(config, model, optimizer, lr_scheduler, logger):
     if os.path.isfile(config.MODEL.RESUME):
-        logger.info(f"==============> Resuming form {config.MODEL.RESUME}....................")
-        checkpoint = torch.load(config.MODEL.RESUME, map_location='cpu')
-        load_state_dict = checkpoint['model']
+        logger.info(
+            f"==============> Resuming form {config.MODEL.RESUME}...................."
+        )
+        checkpoint = torch.load(config.MODEL.RESUME, map_location="cpu")
+        load_state_dict = checkpoint["model"]
 
         # now remove the unwanted keys:
         if "module.prompt_learner.token_prefix" in load_state_dict:
@@ -146,13 +338,15 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, logger):
         logger.info(f"resume model: {msg}")
 
         try:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
 
-            start_epoch = checkpoint['epoch'] + 1
-            max_accuracy = checkpoint['max_accuracy']
+            start_epoch = checkpoint["epoch"] + 1
+            max_accuracy = checkpoint["max_accuracy"]
 
-            logger.info(f"=> loaded successfully '{config.MODEL.RESUME}' (epoch {checkpoint['epoch']})")
+            logger.info(
+                f"=> loaded successfully '{config.MODEL.RESUME}' (epoch {checkpoint['epoch']})"
+            )
 
             del checkpoint
             torch.cuda.empty_cache()
@@ -170,10 +364,12 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, logger):
 
 def auto_resume_helper(output_dir):
     checkpoints = os.listdir(output_dir)
-    checkpoints = [ckpt for ckpt in checkpoints if ckpt.endswith('pth')]
+    checkpoints = [ckpt for ckpt in checkpoints if ckpt.endswith("pth")]
     print(f"All checkpoints founded in {output_dir}: {checkpoints}")
     if len(checkpoints) > 0:
-        latest_checkpoint = max([os.path.join(output_dir, d) for d in checkpoints], key=os.path.getmtime)
+        latest_checkpoint = max(
+            [os.path.join(output_dir, d) for d in checkpoints], key=os.path.getmtime
+        )
         print(f"The latest checkpoint founded: {latest_checkpoint}")
         resume_file = latest_checkpoint
     else:
@@ -183,6 +379,8 @@ def auto_resume_helper(output_dir):
 
 def generate_text(data):
     text_aug = f"{{}}"
-    classes = torch.cat([clip.tokenize(text_aug.format(c), context_length=77) for i, c in data.classes])
+    classes = torch.cat(
+        [clip.tokenize(text_aug.format(c), context_length=77) for i, c in data.classes]
+    )
 
     return classes

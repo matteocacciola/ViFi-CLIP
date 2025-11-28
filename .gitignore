@@ -47,9 +47,6 @@ coverage.xml
 # pgdata
 pgdata/
 
-# datasets
-datasets/
-
 # logs
 .mlflow_logs/
 .output/

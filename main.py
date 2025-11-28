@@ -1,628 +1,653 @@
 import os
-from typing import Tuple, Dict
-from pathlib import Path
-from dataclasses import dataclass, field
-from contextlib import nullcontext
 import argparse
-import datetime
 import shutil
 import time
-import numpy as np
-import random
+from pathlib import Path
+from typing import Optional
+import datetime
 
-import cv2
-import mlflow
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.amp.grad_scaler import GradScaler
-from torch.amp.autocast_mode import autocast
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from timm.loss.cross_entropy import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
-from sklearn.metrics import (
-    precision_score,
-    recall_score,
-    f1_score,
-    ConfusionMatrixDisplay,
-)
-from sklearn.utils.multiclass import unique_labels
-import matplotlib.pyplot as plt
+from torch.amp.grad_scaler import GradScaler
+from torch.amp.autocast_mode import autocast
+from torch.utils.data import DataLoader
+import mlflow
+from tqdm import tqdm
 from yacs.config import CfgNode
 
+# Project imports
 from datasets.build import build_dataloader
 from datasets.blending import CutmixMixupBlending
 from trainers import vificlip
 from utils.optimizer import build_optimizer, build_scheduler
+from torcheval.metrics import Mean
+from torcheval.metrics.toolkit import sync_and_compute
 from utils.tools import (
-    AverageMeter,
-    epoch_saving,
+    TimeMeter,
+    ValidationMeter,
+    ValidationMetrics,
+    load_model_checkpoint,
+    export_onnx,
+    save_checkpoint,
     load_checkpoint,
     auto_resume_helper,
-    load_model_checkpoint,
-    model_onnx_conversion,
 )
 from utils.logger import create_logger
 from utils.config import get_config
 
 
-@dataclass
-class TrainingMetrics:
-    accuracy: float = 0
-    precision: float = 0
-    recall: float = 0
-    f1_score: float = 0
-    loss: float = float("inf")
-    y_true: list[int] = field(default_factory=lambda: [])
-    y_pred: list[int] = field(default_factory=lambda: [])
+BEST_CHECKPOINT_NAME = "best.pth"
 
 
 class ViFiCLIPTrainer:
-    def __init__(self, args, config: CfgNode):
-        """Initialize trainer with configuration and command line arguments."""
-        self.args = args
-        self.config = config
-        self._validate_inputs()
+    """Simplified trainer with improved progress tracking and checkpoint management."""
 
-        # Training state
-        self.current_epoch = 0
-        self.best_metrics = TrainingMetrics()
-
-        # Initialize components
+    def __init__(self, config: CfgNode, args: argparse.Namespace):
+        """Initialize trainer with config and arguments."""
         self._init_distributed()
-        self._set_random_seeds()
-        self._init_logging()
-        self._init_training_components()
-
-    def _validate_inputs(self):
-        """Validate configuration and arguments."""
-        if not Path(self.args.config).exists():
-            raise FileNotFoundError(f"Config file not found: {self.args.config}")
-        if self.config.DATA.NUM_CLASSES <= 1:
-            raise ValueError("Number of classes must be greater than 1")
-
-    def _init_distributed(self):
-        """Initialize distributed training environment."""
-        if torch.cuda.device_count() == 0:
-            raise RuntimeError("No CUDA devices available")
-
-        self.rank = int(os.environ.get("RANK", -1))
-        self.world_size = int(os.environ.get("WORLD_SIZE", -1))
-
-        torch.cuda.set_device(self.args.local_rank)
-        dist.init_process_group(
-            backend="nccl",
-            init_method="env://",
-            world_size=self.world_size,
-            rank=self.rank,
+        self.device = torch.device(f"cuda:{self.local_rank}")
+        self.config = config
+        self.args = args
+        # Setup output directory and logger
+        self.output_dir = Path(config.OUTPUT)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.logger = create_logger(
+            output_dir=self.output_dir, dist_rank=self.rank, name=config.MODEL.ARCH
         )
-        dist.barrier(device_ids=[self.args.local_rank])
 
-    def _set_random_seeds(self):
-        """Set random seeds for reproducibility."""
-        seed = self.config.SEED + dist.get_rank()
+        # Set random seeds for reproducibility
+        seed = config.SEED + self.rank
         torch.manual_seed(seed)
         np.random.seed(seed)
-        random.seed(seed)
         torch.backends.cudnn.benchmark = True
 
-    def _init_logging(self):
-        """Initialize logging system."""
-        self.log_dir = Path(self.config.OUTPUT)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        # Log and save configuration
+        self.logger.info(f"Configuration:\n{config}")
+        self.logger.info(f"Distributed setup: rank={self.rank}/{self.world_size}")
 
-        self.logger = create_logger(
-            output_dir=self.log_dir,
-            dist_rank=dist.get_rank(),
-            name=self.config.MODEL.ARCH,
+        if self.is_main_process:
+            config_file = self.output_dir / "config.yaml"
+            shutil.copy(args.config, config_file)
+            self.logger.info(f"Config saved to {config_file}")
+
+        # Initialize all training components
+        self._init_components()
+
+    def _init_distributed(self):
+        self.rank = int(os.environ["RANK"])
+        self.world_size = int(os.environ["WORLD_SIZE"])
+        self.local_rank = int(os.environ["LOCAL_RANK"])
+        self.is_main_process = self.rank == 0
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(self.local_rank)
+        dist.barrier(device_ids=[self.local_rank])
+
+    def _init_components(self):
+        """Initialize data loaders, model, optimizer, etc."""
+        # Load data
+        self.logger.info("Loading datasets...")
+        self.train_data, self.val_data, self.train_loader, self.val_loader = (
+            build_dataloader(self.config)
         )
-        self._log_configuration()
+        self.class_names = self.train_data.classes
+        self.num_classes = len(self.class_names)
+        self.logger.info(
+            f"Loaded {len(self.train_data)} train, {len(self.val_data)} val samples"
+        )
 
-    def _log_configuration(self):
-        """Log the training configuration."""
-        self.logger.info(f"Logs dir: {self.log_dir}")
-        self.logger.info(f"Training configuration:\n{self.config}")
-        if dist.get_rank() == 0:
-            config_copy_path = self.log_dir / "config.yaml"
-            shutil.copy(self.args.config, config_copy_path)
-            self.logger.info(f"Config file saved to {config_copy_path}")
+        # Build model
+        model = vificlip.returnCLIP(
+            self.config, logger=self.logger, class_names=self.class_names
+        ).to(self.device)
 
-    def _init_training_components(self):
-        """Initialize all components needed for training."""
-        self._init_data_loaders()
-        self._init_model()
-        self._init_loss_function()
-        self._init_optimizer()
-        self._load_checkpoints()
+        # Wrap model for distributed training if needed
+        self.model = DDP(model, device_ids=[self.local_rank])
 
-    def _init_data_loaders(self):
-        """Initialize data loaders for training and validation."""
-        try:
-            self.train_data, self.val_data, self.train_loader, self.val_loader = (
-                build_dataloader(self.logger, self.config)
+        # Count parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        self.logger.info(
+            f"Model has {total_params / 1e6:.2f}M total params, "
+            f"{trainable_params / 1e6:.2f}M trainable"
+        )
+
+        # Setup loss functions with optional class weighting
+        class_weight = None
+        if hasattr(self.train_data, "class_probs"):
+            class_weight = 1.0 / self.train_data.class_probs
+            class_weight = (class_weight / class_weight.sum()).to(self.device)
+            self.logger.info(f"Using balanced class weights: {class_weight}")
+
+        # Validation loss always uses class weights if available
+        self.val_criterion = nn.CrossEntropyLoss(weight=class_weight)
+
+        # Training loss with optional mixup/cutmix
+        if self.config.AUG.MIXUP > 0 or self.config.AUG.CUTMIX > 0:
+            self.logger.info(
+                f"Using Mixup({self.config.AUG.MIXUP}) + "
+                f"Cutmix({self.config.AUG.CUTMIX})"
             )
-            self.class_names = [class_name for _, class_name in self.train_data.classes]
-        except Exception as e:
-            self.logger.error(f"Failed to initialize data loaders: {str(e)}")
-            raise
-
-    def _init_model(self):
-        """Initialize the model and move to GPU."""
-        try:
-            model = vificlip.returnCLIP(
-                self.config, logger=self.logger, class_names=self.class_names
-            ).cuda()
-
-            self.model = DDP(
-                model,
-                device_ids=[self.config.LOCAL_RANK],
-                broadcast_buffers=False,
-                find_unused_parameters=False,
-            )
-        except Exception as e:
-            self.logger.error(f"Model initialization failed: {str(e)}")
-            raise
-
-    def _init_loss_function(self):
-        """Initialize loss function and mixup augmentation."""
-        if self.config.AUG.MIXUP > 0:
-            self.criterion = SoftTargetCrossEntropy()
+            self.train_criterion = nn.CrossEntropyLoss(weight=class_weight)
             self.mixup_fn = CutmixMixupBlending(
-                num_classes=self.config.DATA.NUM_CLASSES,
+                num_classes=self.num_classes,
                 smoothing=self.config.AUG.LABEL_SMOOTH,
                 mixup_alpha=self.config.AUG.MIXUP,
                 cutmix_alpha=self.config.AUG.CUTMIX,
                 switch_prob=self.config.AUG.MIXUP_SWITCH_PROB,
             )
-        elif self.config.AUG.LABEL_SMOOTH > 0:
-            self.criterion = LabelSmoothingCrossEntropy(
-                smoothing=self.config.AUG.LABEL_SMOOTH
+        else:
+            self.train_criterion = nn.CrossEntropyLoss(
+                weight=class_weight,
+                label_smoothing=self.config.AUG.LABEL_SMOOTH,
             )
             self.mixup_fn = None
-        else:
-            self.criterion = nn.CrossEntropyLoss()
-            self.mixup_fn = None
 
-    def _init_optimizer(self):
-        """Initialize optimizer and learning rate scheduler."""
+        # Optimizer and scheduler
         self.optimizer = build_optimizer(self.config, self.model)
         self.lr_scheduler = build_scheduler(
             self.config, self.optimizer, len(self.train_loader)
         )
+
+        # Mixed precision scaler
         self.scaler = GradScaler()
 
-    def _load_checkpoints(self):
-        """Handle checkpoint loading and auto-resume functionality."""
+        # Training state
+        self.start_epoch = 0
+        self.best_metrics = ValidationMetrics()
+        self.best_metric_name = self.config.TRAIN.BEST_METRIC
+
+        # Handle checkpoint loading/resuming
+        self._resume_checkpoint()
+        dist.barrier(device_ids=[self.local_rank])
+
+        # Setup MLflow if enabled
+        self._setup_mlflow()
+
+    def _resume_checkpoint(self):
+        """Load checkpoint with auto-resume support."""
+        # Auto-resume: find latest checkpoint
         if self.config.TRAIN.AUTO_RESUME:
-            resume_file = auto_resume_helper(self.config.OUTPUT)
+            resume_file = auto_resume_helper(self.output_dir)
             if resume_file:
                 self.config.defrost()
                 self.config.MODEL.RESUME = resume_file
                 self.config.freeze()
-                self.logger.info(f"Auto resuming from {resume_file}")
+                self.logger.info(f"Auto-resuming from {resume_file}")
 
+        # Load checkpoint if specified
         if self.config.MODEL.RESUME:
-            self.current_epoch, self.best_metrics.accuracy = load_checkpoint(
+            self.start_epoch, best_acc = load_checkpoint(
                 self.config, self.model, self.optimizer, self.lr_scheduler, self.logger
             )
-            if self.current_epoch > 1:
+
+            # If loading pretrained weights (not resuming), reset epoch
+            if self.config.MODEL.PRETRAINED and self.start_epoch > 0:
                 self.logger.info(
-                    "Resetting epoch counter & best metrics after loading weights"
+                    "Loading pretrained weights only, resetting epoch counter"
                 )
-                self.current_epoch = 0
-                self.best_metrics = TrainingMetrics()
+                self.start_epoch = 0
+            elif best_acc > 0:
+                self.best_metrics.accuracy = best_acc
+                self.logger.info(
+                    f"Resumed from epoch {self.start_epoch} with best acc {best_acc:.2f}%"
+                )
 
-    @staticmethod
-    def _if_mlflow(alt=lambda: None):
-        def decorator(func):
-            def wrapper(self, *args, **kwargs):
-                if self.args.mlflow:
-                    return func(self, *args, **kwargs)
-                else:
-                    return alt()
+    def _setup_mlflow(self):
+        """Setup MLflow experiment tracking."""
+        self.mlflow_enabled = self.args.mlflow and self.is_main_process
 
-            return wrapper
-
-        return decorator
-
-    def run(self):
-        """Main training loop entry point."""
-        if self.config.TEST.ONLY_TEST:
-            test_metrics = self.validate()
-            self.logger.info(
-                f"Test accuracy: {test_metrics.accuracy:.2f}% "
-                f"on {len(self.val_data)} videos"
-            )
-            return
-
-        with self._init_mlflow_run():
+        if self.mlflow_enabled:
             try:
-                for epoch in range(self.current_epoch, self.config.TRAIN.EPOCHS):
-                    train_loss = self._train_epoch(epoch)
-                    self._log_mlflow_metrics(epoch, "train_loss", train_loss)
+                mlflow.set_tracking_uri("file:./.mlflow_logs")
+                mlflow.set_experiment(self.args.experiment_name)
 
-                    if self._should_validate(epoch):
-                        val_metrics = self.validate(return_predictions=True)
-                        self._log_mlflow_validation(epoch, val_metrics)
-                        self._process_validation_results(epoch, val_metrics)
+                # Generate run name
+                run_name = self.args.run_name or (
+                    f"{self.config.MODEL.ARCH}_"
+                    f"lr{self.config.TRAIN.LR}_"
+                    f"bs{self.config.TRAIN.BATCH_SIZE}"
+                )
 
-                    self._optional_multiview_inference()
+                mlflow.start_run(run_name=run_name)
 
-            finally:
-                self._save_final_model()
-                if dist.is_initialized():
-                    dist.destroy_process_group()
+                # Log hyperparameters
+                mlflow.log_params(
+                    {
+                        "model": self.config.MODEL.ARCH,
+                        "epochs": self.config.TRAIN.EPOCHS,
+                        "batch_size": self.config.TRAIN.BATCH_SIZE,
+                        "learning_rate": self.config.TRAIN.LR,
+                        "num_classes": self.num_classes,
+                        "num_frames": self.config.DATA.NUM_FRAMES,
+                        "mixup": self.config.AUG.MIXUP,
+                        "cutmix": self.config.AUG.CUTMIX,
+                    }
+                )
 
-    @_if_mlflow(alt=lambda: nullcontext())
-    def _init_mlflow_run(self):
-        """Initialize MLflow run context."""
-        mlflow.set_tracking_uri("file:./.mlflow_logs")
-        mlflow.set_experiment(self.args.experiment_name)
-        
-        if self.args.run_name:
-            run_name = self.args.run_name
-        else:
-            name_parts = [
-                self.config.MODEL.ARCH,
-                f"LR-{self.config.TRAIN.LR}",
-                f"BS-{self.config.TRAIN.BATCH_SIZE}",
-            ]
+                self.logger.info(f"MLflow tracking enabled: {run_name}")
 
-            if hasattr(self.config.TRAINER.ViFi_CLIP, "USE"):
-                name_parts.append(f"Freeze-{self.config.TRAINER.ViFi_CLIP.USE}")
+            except Exception as e:
+                self.logger.warning(f"Failed to setup MLflow: {e}")
+                self.mlflow_enabled = False
 
-            run_name = "_".join(name_parts)
-        run = mlflow.start_run(run_name=run_name)
-
-        mlflow.log_params(
-            {
-                "epochs": self.config.TRAIN.EPOCHS,
-                "lr": self.config.TRAIN.LR,
-                "batch_size": self.config.TRAIN.BATCH_SIZE,
-                "weight_decay": self.config.TRAIN.WEIGHT_DECAY,
-                "model_arch": self.config.MODEL.ARCH,
-                "num_classes": self.config.DATA.NUM_CLASSES,
-                "mixup": self.config.AUG.MIXUP,
-                "label_smoothing": self.config.AUG.LABEL_SMOOTH,
-                "config_file": os.path.basename(self.args.config),
-            }
-        )
-
-        return run
-
-    def _train_epoch(self, epoch: int) -> float:
-        """Train model for one epoch."""
+    def train_epoch(self, epoch: int) -> float:
+        """Train for one epoch with detailed progress tracking."""
         self.model.train()
-        self.train_loader.sampler.set_epoch(epoch)
-        self.optimizer.zero_grad()
 
-        batch_time = AverageMeter()
-        loss_meter = AverageMeter()
-        start = time.time()
-        batch_start = time.time()
+        # Set epoch for distributed sampler
+        if hasattr(self.train_loader.sampler, "set_epoch"):
+            self.train_loader.sampler.set_epoch(epoch)
 
-        for batch_idx, batch_data in enumerate(self.train_loader):
-            # Process batch
-            images, labels = self._prepare_batch(batch_data)
-            loss = self._train_batch(images, labels, epoch, batch_idx)
+        # Metrics
+        loss_meter = Mean()
+        time_meter = TimeMeter()
 
-            # Update metrics
-            loss_meter.update(loss.item(), len(labels))
-            batch_time.update(time.time() - batch_start)
-            batch_start = time.time()
-
-            # Log progress
-            if batch_idx % self.config.PRINT_FREQ == 0:
-                self._log_batch_progress(
-                    epoch, batch_idx, len(self.train_loader), batch_time, loss_meter
-                )
-
-        self._log_epoch_completion(epoch, loss_meter.avg, start)
-        return loss_meter.avg
-
-    def _prepare_batch(self, batch_data: Dict) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Prepare batch data for training."""
-        images = batch_data["imgs"].cuda(non_blocking=True)
-        labels = batch_data["label"].cuda(non_blocking=True).reshape(-1)
-        images = images.view((-1, self.config.DATA.NUM_FRAMES, 3) + images.size()[-2:])
-
-        if self.mixup_fn:
-            images, labels = self.mixup_fn(images, labels)
-
-        return images, labels
-
-    def _train_batch(
-        self, images: torch.Tensor, labels: torch.Tensor, epoch: int, batch_idx: int
-    ) -> torch.Tensor:
-        """Process a single training batch."""
-
-        with autocast(device_type="cuda"):
-            outputs = self.model(images.float())
-            loss = (
-                self.criterion(outputs, labels) / self.config.TRAIN.ACCUMULATION_STEPS
-            )
-
-        self.scaler.scale(loss).backward()
-
-        if (batch_idx + 1) % self.config.TRAIN.ACCUMULATION_STEPS == 0 or (
-            batch_idx + 1 == len(self.train_loader)
-        ):
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.optimizer.zero_grad()
-            self.lr_scheduler.step_update(epoch * len(self.train_loader) + batch_idx)
-
-        return loss
-
-    def _log_batch_progress(
-        self,
-        epoch: int,
-        batch_idx: int,
-        total_batches: int,
-        batch_time: AverageMeter,
-        loss_meter: AverageMeter,
-    ):
-        """Log training progress for current batch."""
-        remaining_time = batch_time.avg * (total_batches - batch_idx)
-        self.logger.info(
-            f"Train: [{epoch}/{config.TRAIN.EPOCHS}][{batch_idx}/{total_batches}]\t"
-            f"Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
-            f"Loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t"
-            f"ETA {datetime.timedelta(seconds=int(remaining_time))}\t"
-            f"LR {self.optimizer.param_groups[0]['lr']:.6f}\t"
-            f"Mem {torch.cuda.max_memory_allocated() / 1024**2:.0f}MB"
+        # Progress bar (only show on main process)
+        pbar = tqdm(
+            self.train_loader,
+            desc=f"Train Epoch {epoch}/{self.config.TRAIN.EPOCHS}",
+            disable=not self.is_main_process,
         )
 
-    def _log_epoch_completion(self, epoch: int, avg_loss: float, start_time: float):
-        """Log completion of training epoch."""
-        self.logger.info(f"Train [{datetime.timedelta(seconds=int(time.time() - start_time))}] - Epoch {epoch}\t Loss: {avg_loss:.4f}")
+        end = time.time()
 
-    @torch.inference_mode()
-    def validate(self, val_loader=None, return_predictions=False) -> TrainingMetrics:
-        """Validate model performance."""
-        val_loader = val_loader or self.val_loader
+        for batch_idx, batch_data in enumerate(pbar):
+            # Measure data loading time
+            time_meter.data_meter.update(torch.tensor(time.time() - end))
+
+            # Prepare batch
+            images = batch_data["imgs"].to(self.device, non_blocking=True)
+            labels = batch_data["label"].to(self.device, non_blocking=True).flatten()
+            # Reshape for video frames [B, T, C, H, W]
+            if images.size(1) != self.config.DATA.NUM_FRAMES:
+                images = images.view(-1, self.config.DATA.NUM_FRAMES, *images.shape[2:])
+
+            # Apply mixup/cutmix if enabled
+            if self.mixup_fn:
+                images, labels = self.mixup_fn(images, labels)
+
+            # Forward pass with mixed precision
+            with autocast(device_type="cuda"):
+                outputs = self.model(images)
+                loss = self.train_criterion(outputs, labels)
+                loss_meter.update(loss.cpu(), weight=len(outputs))
+                loss = loss / self.config.TRAIN.ACCUMULATION_STEPS
+            # Backward pass
+            self.scaler.scale(loss).backward()
+
+            # Optimizer step with gradient accumulation
+            if (batch_idx + 1) % self.config.TRAIN.ACCUMULATION_STEPS == 0 or (
+                batch_idx + 1
+            ) == len(self.train_loader):
+                # Optional gradient clipping for stability
+                if self.config.TRAIN.get("CLIP_GRAD", 0) > 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.config.TRAIN.CLIP_GRAD
+                    )
+                # Optimizer step
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
+                # Update learning rate
+                if self.lr_scheduler:
+                    self.lr_scheduler.step_update(
+                        epoch * len(self.train_loader) + batch_idx
+                    )
+
+            # Update metrics
+            time_meter.batch_meter.update(torch.tensor(time.time() - end))
+            # Update progress bar with timing info
+            if (
+                dist.is_available()
+                and dist.is_initialized()
+                and dist.get_world_size() > 1
+            ):
+                loss_avg = sync_and_compute(loss_meter).item()
+            else:
+                loss_avg = loss_meter.compute().item()
+            data_avg = time_meter.data_time
+            batch_avg = time_meter.batch_time
+            if self.is_main_process:
+                pbar.set_postfix(
+                    {
+                        "loss": f"{loss_avg:.4f}",
+                        "lr": f"{self.optimizer.param_groups[0]['lr']:.2e}",
+                        "data_t": f"{data_avg:.2f}s",
+                        "batch_t": f"{batch_avg:.2f}s",
+                    }
+                )
+
+        loss_meter.reset()
+        time_meter.reset()
+
+        return loss_avg
+
+    @torch.no_grad()
+    def validate(self, loader: Optional[DataLoader] = None) -> ValidationMetrics:
+        """
+        Validate the model with proper distributed metrics handling.
+
+        Note on distributed metrics:
+        - loss and accuracy are synchronized across GPUs using AverageMeter.sync()
+        - precision/recall/f1 are only computed on main process from gathered predictions
+        - This ensures consistency and correctness in distributed settings
+        """
         self.model.eval()
+        loader = loader or self.val_loader
 
-        acc_meter = AverageMeter()
-        loss_meter = AverageMeter()
-        metrics = TrainingMetrics()
-        self.logger.info(
-            f"Running validation with {self.config.TEST.NUM_CLIP * self.config.TEST.NUM_CROP} views"
-        )
+        # Metrics using AverageMeter for proper distributed sync
+        val_meter = ValidationMeter(classes=self.class_names)
+        time_meter = TimeMeter()
 
-        for batch_idx, batch_data in enumerate(val_loader):
-            images, labels = self._prepare_validation_batch(batch_data)
-            outputs = self._process_validation_batch(images)
+        # Collect predictions only on main process to save memory
 
-            # Update metrics
-            loss = F.cross_entropy(outputs, labels).item()
-            preds = outputs.argmax(dim=-1).numpy(force=True)
-            targets = labels.numpy(force=True)
-            accuracy = (preds == targets).mean() * 100
+        pbar = tqdm(loader, desc="Validation", disable=not self.is_main_process)
 
-            acc_meter.update(accuracy, len(images))
-            loss_meter.update(loss, len(images))
-            if return_predictions:
-                metrics.y_true.extend(targets)
-                metrics.y_pred.extend(preds)
+        end = time.time()
+        for batch_data in pbar:
+            # Measure data loading time
+            time_meter.data_meter.update(torch.tensor(time.time() - end))
 
-            # Log progress
-            if batch_idx % self.config.PRINT_FREQ == 0:
-                self.logger.info(
-                    f"Validation: [{batch_idx}/{len(val_loader)}] "
-                    f"Acc@1: {acc_meter.avg:.3f}"
+            # Prepare batch
+            images = batch_data["imgs"].to(self.device, non_blocking=True)
+            labels = batch_data["label"].to(self.device, non_blocking=True).flatten()
+
+            # Multi-view inference: average predictions across views
+            b, tn, c, h, w = images.size()
+            t = self.config.DATA.NUM_FRAMES
+            n = tn // t  # Number of views
+            images = images.view(b * n, t, c, h, w)
+            labels = labels.repeat_interleave(n)
+
+            with autocast(device_type="cuda"):
+                logits = self.model(images)
+                loss = self.val_criterion(logits, labels)
+                val_meter.update_loss(loss, n_samples=len(labels))
+
+            logits = logits.view(b, n, -1).mean(dim=1)
+
+            # Compute metrics
+            preds = logits.argmax(dim=-1)
+            val_meter.update(preds, labels)
+
+            time_meter.batch_meter.update(torch.tensor(time.time() - end))
+            end = time.time()
+
+            # Update progress bar
+            if self.is_main_process:
+                pbar.set_postfix(
+                    {
+                        "loss": f"{val_meter.loss:.4f}",
+                        "acc": f"{val_meter.accuracy:.3f}",
+                        "data_t": f"{time_meter.data_time:.3f}s",
+                        "batch_t": f"{time_meter.batch_time:.3f}s",
+                    }
                 )
 
-        # Finalize metrics
-        acc_meter.sync()
-        loss_meter.sync()
-        metrics.accuracy = acc_meter.avg
-        metrics.loss = loss_meter.avg
+        # Synchronize and compute metrics across all GPUs
+        metrics = val_meter.get_val_metrics()
 
-        if return_predictions:
-            metrics.precision = precision_score(
-                metrics.y_true, metrics.y_pred, average="macro", zero_division=0
-            ) # type: ignore
-            metrics.recall = recall_score(
-                metrics.y_true, metrics.y_pred, average="macro", zero_division=0
-            ) # type: ignore
-            metrics.f1_score = f1_score(
-                metrics.y_true, metrics.y_pred, average="macro", zero_division=0
-            ) # type: ignore
-
+        val_meter.reset()
         return metrics
 
-    def _prepare_validation_batch(
-        self, batch_data: Dict
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Prepare batch data for validation."""
-        images = batch_data["imgs"].cuda(non_blocking=True)
-        labels = batch_data["label"].reshape(-1).cuda(non_blocking=True)
-        return images, labels
-
-    def _process_validation_batch(self, images: torch.Tensor) -> torch.Tensor:
-        """Process validation batch through model."""
-        b, tn, c, h, w = images.size()
-        t = self.config.DATA.NUM_FRAMES
-        n = tn // t
-        images = images.view(b, n, t, c, h, w)
-
-        outputs = torch.zeros((b, self.config.DATA.NUM_CLASSES)).cuda()
-        for i in range(n):
-            output = self.model(images[:, i].float()).view(b, -1).softmax(dim=-1)
-            outputs += output
-
-        return outputs
-
-    def _should_validate(self, epoch: int) -> bool:
-        """Determine if validation should run this epoch."""
-        return epoch % self.config.SAVE_FREQ == 0 or epoch == (
-            self.config.TRAIN.EPOCHS - 1
-        )
-
-    def _process_validation_results(self, epoch: int, metrics: TrainingMetrics):
-        """Process and log validation results."""
-        self.logger.info(
-            f"Validation - Epoch: {epoch}\n"
-            f"Accuracy: {metrics.accuracy:.2f}%\t"
-            f"Precision: {metrics.precision:.2f}\t"
-            f"Recall: {metrics.recall:.2f}\t"
-            f"F1: {metrics.f1_score:.2f}\t"
-            f"Loss: {metrics.loss:.6f}"
-        )
-
-        is_best = metrics.loss < self.best_metrics.loss
+    def _save_checkpoint(
+        self, epoch: int, metrics: ValidationMetrics, force_save: bool = False
+    ):
+        """
+        Smart checkpoint saving strategy:
+        - Always track and save the best model
+        - Save regular checkpoints based on SAVE_FREQ
+        - Avoid saving unnecessary intermediate checkpoints
+        """
+        # Check if this is the best model so far
+        is_best = metrics.is_better_than(self.best_metrics, self.best_metric_name)
         if is_best:
             self.best_metrics = metrics
-
-        if dist.get_rank() == 0 and is_best:
-            epoch_saving(
-                self.config,
-                epoch,
-                self.model,
-                self.best_metrics.accuracy,
-                self.optimizer,
-                self.lr_scheduler,
-                self.logger,
-                self.config.OUTPUT,
-                is_best,
+            self.logger.info(
+                f"New best model! {self.best_metric_name}: "
+                f"{getattr(metrics, self.best_metric_name):.4f}"
             )
-        dist.barrier(device_ids=[self.args.local_rank])
 
-    @_if_mlflow()
-    def _log_mlflow_validation(self, epoch: int, metrics: TrainingMetrics):
-        """Log validation metrics to MLflow."""
-        mlflow.log_metrics(
-            {
-                "val_acc": metrics.accuracy,
-                "val_precision": metrics.precision,
-                "val_recall": metrics.recall,
-                "val_f1": metrics.f1_score,
-                "val_loss": metrics.loss,
-            },
-            step=epoch,
+        # Determine if we should save a regular checkpoint
+        is_intermediat_save = force_save or epoch % self.config.SAVE_FREQ == 0
+
+        # Save checkpoint (main process only)
+        save_path = self.output_dir / "last.pth"
+        save_checkpoint(
+            self.config,
+            epoch,
+            self.model,
+            metrics.accuracy,
+            self.optimizer,
+            self.lr_scheduler,
+            save_path=save_path,
+        )
+        if is_best:
+            best_path = self.output_dir / BEST_CHECKPOINT_NAME
+            shutil.copy(save_path, best_path)
+        if is_intermediat_save:
+            intermediate_path = self.output_dir / f"epoch_{epoch}.pth"
+            shutil.copy(save_path, intermediate_path)
+
+    def train(self):
+        """Main training loop with improved checkpoint management."""
+        # Test-only mode
+        if self.config.TEST.ONLY_TEST:
+            self.logger.info("Running test-only evaluation...")
+            metrics = self.validate()
+            self.logger.info(f"Test Results: {metrics}")
+            return
+
+        self.logger.info(f"Starting training from epoch {self.start_epoch}")
+        self.logger.info(f"Best metric to track: {self.best_metric_name}")
+        self.logger.info(
+            f"Checkpoint save frequency: every {self.config.SAVE_FREQ} epochs"
         )
 
-        if dist.get_rank() == 0:
-            fig, ax = plt.subplots(figsize=(8, 8))
-            present_labels = unique_labels(metrics.y_true, metrics.y_pred)
-            present_class_names = [self.class_names[i] for i in present_labels]
+        # Early stopping setup
+        patience = self.config.TRAIN.get("EARLY_STOPPING_PATIENCE", 0)
+        patience_counter = 0
+        best_early_stop_value = float("inf") if self.best_metric_name == "loss" else 0
 
-            ConfusionMatrixDisplay.from_predictions(
-                metrics.y_true,
-                metrics.y_pred,
-                display_labels=present_class_names,
-                ax=ax,
-                xticks_rotation=45,
-                colorbar=False,
-            )
+        for epoch in range(self.start_epoch, self.config.TRAIN.EPOCHS):
+            epoch_start = time.time()
 
-            fig.tight_layout()
+            # Training phase
+            train_loss = self.train_epoch(epoch)
 
-            fig_path = f"confusion_matrices/{epoch}.png"
-            mlflow.log_figure(fig, fig_path)
-            plt.close(fig)
+            # Log training metrics
+            if self.mlflow_enabled:
+                mlflow.log_metric("train_loss", train_loss, step=epoch)
 
-    def _optional_multiview_inference(self):
-        """Run multi-view inference if configured."""
-        if self.config.TEST.MULTI_VIEW_INFERENCE:
-            self.config.defrost()
-            self.config.TEST.NUM_CLIP = 4
-            self.config.TEST.NUM_CROP = 3
-            self.config.freeze()
+            # Validation phase (always validate to track best model)
+            val_metrics = self.validate()
 
-            _, val_data, _, val_loader = build_dataloader(self.logger, self.config)
-            metrics = self.validate(val_loader)
+            # Log validation results
+            self.logger.info(f"Epoch {epoch} - Train Loss: {train_loss:.4f}")
+            self.logger.info(f"Epoch {epoch} - Validation Loss: {val_metrics.loss:.4f}\n{val_metrics.to_table()}")
 
+            # MLflow logging
+            if self.mlflow_enabled:
+                mlflow.log_metrics(
+                    {
+                        "val_loss": val_metrics.loss,
+                        "val_accuracy": val_metrics.accuracy,
+                        "val_precision": val_metrics.precision,
+                        "val_recall": val_metrics.recall,
+                        "val_f1": val_metrics.f1,
+                    },
+                    step=epoch,
+                )
+
+            # Save checkpoint (handles best model tracking internally)
+            if self.is_main_process:
+                self._save_checkpoint(epoch, val_metrics)
+
+            # Early stopping check
+            if patience > 0:
+                current_value = getattr(val_metrics, self.best_metric_name)
+
+                # Check if improved
+                if self.best_metric_name == "loss":
+                    improved = current_value < best_early_stop_value
+                else:
+                    improved = current_value > best_early_stop_value
+
+                if improved:
+                    best_early_stop_value = current_value
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    self.logger.info(
+                        f"No improvement for {patience_counter}/{patience} epochs"
+                    )
+
+                    if patience_counter >= patience:
+                        self.logger.info(f"Early stopping triggered at epoch {epoch}")
+                        break
+
+            # Log epoch time
+            epoch_time = time.time() - epoch_start
             self.logger.info(
-                f"Multi-view test accuracy: {metrics.accuracy:.1f}% "
-                f"on {len(val_data)} videos"
+                f"Epoch {epoch} completed in "
+                f"{datetime.timedelta(seconds=int(epoch_time))}\n"
+                + "=" * 50
             )
 
-    def _save_final_model(self):
-        """Save final model and convert to ONNX."""
-        if dist.get_rank() == 0:
-            best_model_path = self.log_dir / "best.pth"
-            load_model_checkpoint(self.model, best_model_path, self.logger)
-            model_onnx_conversion(self.model, self.log_dir, self.logger)
+        # Save metrics
+        if self.is_main_process:
+            metrics_path = self.output_dir / "best_metrics.csv"
+            self.best_metrics.save_to_csv(metrics_path)
 
-    @_if_mlflow()
-    def _log_mlflow_metrics(self, epoch: int, metric_name: str, value: float):
-        """Log training metrics to MLflow."""
-        mlflow.log_metric(metric_name, value, step=epoch)
+        # Save the onnx conversion of the best model
+        best_path = self.output_dir / BEST_CHECKPOINT_NAME
+        self.logger.info("Loading the best model from: %s", best_path)
+        load_model_checkpoint(self.model, best_path, self.logger)
+        if self.is_main_process:
+            export_onnx(self.model, self.output_dir, self.logger)
+
+        # Multi-view test if configured
+        if self.config.TEST.MULTI_VIEW_INFERENCE:
+            self._run_multiview_test()
+
+        # Final summary
+        self.logger.info(
+            f"Training complete! Loading model with best {self.best_metric_name}.\n" 
+            f"Loss: {self.best_metrics.loss:.4f}\n\n"
+            f"{self.best_metrics.to_table()}"
+        )
+
+    def _run_multiview_test(self):
+        """Run enhanced multi-view testing."""
+        self.logger.info("Running multi-view inference test...")
+
+        # Temporarily update config for more views
+        original_clip = self.config.TEST.NUM_CLIP
+        original_crop = self.config.TEST.NUM_CROP
+
+        self.config.defrost()
+        self.config.TEST.NUM_CLIP = 4
+        self.config.TEST.NUM_CROP = 3
+        self.config.freeze()
+
+        # Build new test loader with more views
+        _, _, _, test_loader = build_dataloader(self.config)
+
+        # Run validation
+        test_metrics = self.validate(test_loader)
+
+        self.logger.info(
+            f"Multi-view Test ({self.config.TEST.NUM_CLIP}x{self.config.TEST.NUM_CROP} views): "
+            f"{test_metrics}"
+        )
+
+        # Restore original config
+        self.config.defrost()
+        self.config.TEST.NUM_CLIP = original_clip
+        self.config.TEST.NUM_CROP = original_crop
+        self.config.freeze()
+
+    def cleanup(self):
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        if self.mlflow_enabled:
+            mlflow.end_run()
 
 
-def parse_option():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", "-cfg", required=True, type=str)
-    parser.add_argument(
-        "--opts",
-        help="Modify config options by adding 'KEY VALUE' pairs. ",
-        default=None,
-        nargs="+",
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="ViFi-CLIP Training",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--output", type=str, default=None)
-    parser.add_argument("--resume", type=str)
-    parser.add_argument("--pretrained", type=str)
-    parser.add_argument("--only_test", action="store_true")
-    parser.add_argument("--batch-size", type=int)
-    parser.add_argument("--accumulation-steps", type=int)
+
+    # Required
+    parser.add_argument("--config", "-cfg", required=True, help="Path to config file")
+
+    # Optional overrides
+    parser.add_argument("--opts", nargs="+", help="Modify config using KEY VALUE pairs")
+    parser.add_argument("--output", type=str, help="Output directory override")
+    parser.add_argument("--resume", type=str, help="Resume from checkpoint")
+    parser.add_argument("--pretrained", type=str, help="Load pretrained weights")
+    parser.add_argument("--only-test", action="store_true", help="Test only mode")
+    parser.add_argument("--batch-size", type=int, help="Override batch size")
     parser.add_argument(
-        "--local_rank",
-        type=int,
-        default=-1,
-        help="local rank for DistributedDataParallel",
+        "--accumulation-steps", type=int, help="Gradient accumulation steps"
     )
-    parser.add_argument("--validate-videos", action="store_true")
-    parser.add_argument("--mlflow", action="store_true")
+
+    # Distributed
+    parser.add_argument(
+        "--local-rank", type=int, default=-1, help="Local rank for distributed training"
+    )
+
+    # MLflow
+    parser.add_argument("--mlflow", action="store_true", help="Enable MLflow tracking")
     parser.add_argument(
         "--experiment-name",
         type=str,
-        default="ViFi-CLIP_Few-Shot",
-        help="Name of the MLflow experiment",
+        default="ViFi-CLIP",
+        help="MLflow experiment name",
     )
-    parser.add_argument(
-        "--run-name", type=str, default=None, help="Name of the MLflow run"
-    )
+    parser.add_argument("--run-name", type=str, help="MLflow run name")
+
     args = parser.parse_args()
 
+    # Get local rank from environment if not specified
     if args.local_rank == -1:
         args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
+    return args
+
+
+def main():
+    """Main entry point."""
+    args = parse_args()
+
+    # Load configuration
     config = get_config(args)
 
-    return args, config
+    # Basic validation
+    if not Path(config.DATA.ROOT).exists():
+        raise ValueError(f"Data root not found: {config.DATA.ROOT}")
 
+    # Create trainer
+    trainer = ViFiCLIPTrainer(config, args)
 
-def validate_videos(dataset_path):
-    logger = create_logger(
-        output_dir=config.OUTPUT, dist_rank=0, name=f"{config.MODEL.ARCH}"
-    )
-    logger.info(f"Validating video files in {config.DATA.ROOT}")
-    corrupted_files = []
-    for root, dirs, files in os.walk(dataset_path):
-        for file in files:
-            if not file.endswith((".mp4", ".avi", ".mov")):
-                continue
-
-            video_path = os.path.join(root, file)
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                corrupted_files.append(video_path)
-            cap.release()
-    if corrupted_files:
-        logger.error("Corrupted video files found:")
-        for file in corrupted_files:
-            logger.error(file)
-    else:
-        logger.info("No corrupted video files found.")
+    try:
+        # Run training
+        trainer.train()
+    except KeyboardInterrupt:
+        trainer.logger.info("Training interrupted by user")
+    except Exception as e:
+        trainer.logger.error(f"Training failed: {str(e)}", exc_info=True)
+        raise
+    finally:
+        trainer.cleanup()
 
 
 if __name__ == "__main__":
-    args, config = parse_option()
-
-    if args.validate_videos:
-        validate_videos(config.DATA.ROOT)
-    else:
-        trainer = ViFiCLIPTrainer(args, config)
-        trainer.run()
+    main()

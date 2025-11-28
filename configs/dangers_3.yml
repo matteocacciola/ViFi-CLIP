@@ -1,0 +1,28 @@
+DATA:
+  ROOT: '../data/dataset'
+  TRAIN_FILE: '../data/train.txt'
+  VAL_FILE: '../data/val.txt'
+  DATASET: 'movyon'
+  INPUT_SIZE: 224
+  NUM_FRAMES: 32
+  LABEL_LIST: 'labels/dangers_3.csv'
+
+MODEL:
+  ARCH: 'ViT-B/16'
+
+TRAIN:
+  EPOCHS: 100
+  WARMUP_EPOCHS: 10
+  WEIGHT_DECAY: 0.001
+  LR: 5e-5
+  BATCH_SIZE: 8
+  ACCUMULATION_STEPS: 2
+  BEST_METRIC: f1
+
+TRAINER:
+  ViFi_CLIP:
+    USE: both
+
+OUTPUT: '.runs'
+SAVE_FREQ: 25
+SEED: 42
