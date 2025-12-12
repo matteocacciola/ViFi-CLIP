@@ -6,10 +6,8 @@ import warnings
 
 import pandas as pd
 
-from torcheval.metrics.toolkit import sync_and_compute
-from torcheval.metrics import (
-    Metric,
-    Mean,
+from torchmetrics import MetricCollection
+from torchmetrics.classification import (
     MulticlassAccuracy,
     MulticlassPrecision,
     MulticlassRecall,
@@ -26,185 +24,105 @@ from onnxconverter_common.auto_mixed_precision import auto_convert_mixed_precisi
 import clip
 
 
+def get_metrics(num_classes: int) -> MetricCollection:
+    return MetricCollection(
+        {
+            "accuracy": MulticlassAccuracy(num_classes, average="macro"),
+            "precision": MulticlassPrecision(num_classes, average="macro"),
+            "recall": MulticlassRecall(num_classes, average="macro"),
+            "f1": MulticlassF1Score(num_classes, average="macro"),
+            "accuracy_per_class": MulticlassAccuracy(num_classes, average=None),
+            "precision_per_class": MulticlassPrecision(num_classes, average=None),
+            "recall_per_class": MulticlassRecall(num_classes, average=None),
+            "f1_per_class": MulticlassF1Score(num_classes, average=None),
+        }
+    )
+
+
 @dataclass
-class ValidationMetrics:
-    """Container for validation metrics."""
+class ValidationResults:
+    """Container for validation metrics results."""
 
-    loss: float = float("inf")
-    accuracy: float = 0.0
-    precision: float = 0.0
-    recall: float = 0.0
-    f1: float = 0.0
+    classes: list[str]
 
-    classes: list[str] = field(default_factory=list)
-    per_class_precision: list[float] = field(default_factory=list)
-    per_class_recall: list[float] = field(default_factory=list)
-    per_class_f1: list[float] = field(default_factory=list)
-    per_class_accuracy: list[float] = field(default_factory=list)
+    loss: torch.Tensor
 
-    def is_better_than(self, other: "ValidationMetrics", metric: str = "loss") -> bool:
+    accuracy: torch.Tensor
+    precision: torch.Tensor
+    recall: torch.Tensor
+    f1: torch.Tensor
+
+    precision_per_class: torch.Tensor
+    recall_per_class: torch.Tensor
+    f1_per_class: torch.Tensor
+    accuracy_per_class: torch.Tensor
+
+    epoch: int = 0
+
+    def is_better_than(
+        self, other: "ValidationResults | None ", metric: str = "loss"
+    ) -> bool:
         """Check if current metrics are better than another set."""
-        if metric == "loss":
-            return self.loss < other.loss
+        if other is None:
+            return True
+        elif metric == "loss":
+            return self.loss.item() < other.loss.item()
         elif hasattr(self, metric):
-            return getattr(self, metric) > getattr(other, metric)
+            return getattr(self, metric).item() > getattr(other, metric).item()
         else:
             raise ValueError(f"Unknown metric: {metric}")
 
     def __str__(self) -> str:
         return (
-            f"Loss: {self.loss:.4f}, Acc: {self.accuracy:.3f}, "
-            f"P: {self.precision:.3f}, R: {self.recall:.3f}, F1: {self.f1:.3f}"
+            f"Loss: {self.loss.item():.4f}, Acc: {self.accuracy.item():.3f}, "
+            f"P: {self.precision.item():.3f}, R: {self.recall.item():.3f}, F1: {self.f1.item():.3f}"
         )
-    
+
     def to_dataframe(self) -> pd.DataFrame:
         """
         Convert metrics to a DataFrame with per-class rows + macro avg row.
-        
+
         Returns:
             DataFrame with columns: ['class', 'accuracy', 'precision', 'recall', 'f1']
         """
         rows = []
-        
         # Add per-class rows
         for i, class_name in enumerate(self.classes):
-            rows.append({
-                'class': class_name,
-                'accuracy': self.per_class_accuracy[i],
-                'precision': self.per_class_precision[i],
-                'recall': self.per_class_recall[i],
-                'f1': self.per_class_f1[i],
-            })
-        
+            rows.append(
+                {
+                    "class": class_name,
+                    "accuracy": self.accuracy_per_class[i].item(),
+                    "precision": self.precision_per_class[i].item(),
+                    "recall": self.recall_per_class[i].item(),
+                    "f1": self.f1_per_class[i].item(),
+                }
+            )
+
         # Add macro average row
-        rows.append({
-            'class': 'macro avg',
-            'accuracy': self.accuracy,
-            'precision': self.precision,
-            'recall': self.recall,
-            'f1': self.f1,
-        })
-        
+        rows.append(
+            {
+                "class": "AVG (macro)",
+                "accuracy": self.accuracy.item(),
+                "precision": self.precision.item(),
+                "recall": self.recall.item(),
+                "f1": self.f1.item(),
+            }
+        )
+
         df = pd.DataFrame(rows)
-        df = df.set_index('class')
+        df = df.set_index("class")
 
         return df
 
     def to_table(self) -> str:
         """Convert metrics to a table string using DataFrame."""
         df = self.to_dataframe()
-        return df.to_string(float_format='%.4f')
-    
+        return df.to_string(float_format="%.4f")
+
     def save_to_csv(self, filepath: Path):
         """Save metrics to CSV file using DataFrame."""
         df = self.to_dataframe()
-        df.to_csv(filepath, float_format='%.4f')
-
-
-def compute(metric: Metric):
-    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
-        return sync_and_compute(metric)
-    return metric.compute()
-
-class ValidationMeter:
-    def __init__(self, classes: list[str]) -> None:
-        self.classes = classes
-        self.n_classes = len(self.classes)
-        self.loss_meter = Mean()
-        self.acc_meter = MulticlassAccuracy(average="macro", num_classes=self.n_classes)
-        self.p_meter = MulticlassPrecision(average="macro", num_classes=self.n_classes)
-        self.r_meter = MulticlassRecall(average="macro", num_classes=self.n_classes)
-        self.f1_meter = MulticlassF1Score(average="macro", num_classes=self.n_classes)
-
-        # Per-class metrics (no averaging)
-        self.p_meter_per_class = MulticlassPrecision(average=None, num_classes=self.n_classes)
-        self.r_meter_per_class = MulticlassRecall(average=None, num_classes=self.n_classes)
-        self.f1_meter_per_class = MulticlassF1Score(average=None, num_classes=self.n_classes)
-        self.acc_meter_per_class = MulticlassAccuracy(average=None, num_classes=self.n_classes)
-
-    @property
-    def loss(self):
-        return compute(self.loss_meter).item()
-
-    @property
-    def accuracy(self):
-        return compute(self.acc_meter).item()
-
-    @property
-    def precision(self):
-        return compute(self.p_meter).item()
-
-    @property
-    def recall(self):
-        return compute(self.r_meter).item()
-
-    @property
-    def f1(self):
-        return compute(self.f1_meter).item()
-
-    def update_loss(self, loss, n_samples):
-        self.loss_meter.update(loss.cpu(), weight=n_samples)
-
-    def update(self, inputs: torch.Tensor, target: torch.Tensor):
-        inputs = inputs.cpu()
-        target = target.cpu()
-
-        # Update aggregate metrics
-        self.acc_meter.update(inputs, target)
-        self.p_meter.update(inputs, target)
-        self.r_meter.update(inputs, target)
-        self.f1_meter.update(inputs, target)
-        # Update per-class metrics
-        self.p_meter_per_class.update(inputs, target)
-        self.r_meter_per_class.update(inputs, target)
-        self.f1_meter_per_class.update(inputs, target)
-        self.acc_meter_per_class.update(inputs, target)
-
-    def reset(self):
-        """Reset all internal meters."""
-        self.loss_meter.reset()
-        self.acc_meter.reset()
-        self.p_meter.reset()
-        self.r_meter.reset()
-        self.f1_meter.reset()
-        self.p_meter_per_class.reset()
-        self.r_meter_per_class.reset()
-        self.f1_meter_per_class.reset()
-        self.acc_meter_per_class.reset()
-
-
-    def get_val_metrics(self) -> ValidationMetrics:
-        """Compute current metrics and return a ValidationMetrics object."""
-        return ValidationMetrics(
-            loss=self.loss,
-            accuracy=self.accuracy,
-            precision=self.precision,
-            recall=self.recall,
-            f1=self.f1,
-            classes=self.classes,
-            per_class_accuracy=compute(self.acc_meter_per_class).tolist(),
-            per_class_precision=compute(self.p_meter_per_class).tolist(),
-            per_class_recall=compute(self.r_meter_per_class).tolist(),
-            per_class_f1=compute(self.f1_meter_per_class).tolist(),
-        )
-    
-class TimeMeter:
-    def __init__(self) -> None:
-        self.data_meter = Mean()
-        self.batch_meter = Mean()
-        
-    @property
-    def data_time(self):
-        return compute(self.data_meter).item()
-
-    @property
-    def batch_time(self):
-        return compute(self.batch_meter).item()
-    
-    def reset(self):
-        """Reset all internal meters."""
-        self.data_meter.reset()
-        self.batch_meter.reset()
+        df.to_csv(filepath, float_format="%.4f")
 
 
 def reduce_tensor(tensor, n=None):

@@ -23,12 +23,10 @@ from datasets.build import build_dataloader
 from datasets.blending import CutmixMixupBlending
 from trainers import vificlip
 from utils.optimizer import build_optimizer, build_scheduler
-from torcheval.metrics import Mean
-from torcheval.metrics.toolkit import sync_and_compute
+from torchmetrics.aggregation import MeanMetric
 from utils.tools import (
-    TimeMeter,
-    ValidationMeter,
-    ValidationMetrics,
+    ValidationResults,
+    get_metrics,
     load_model_checkpoint,
     export_onnx,
     save_checkpoint,
@@ -81,7 +79,7 @@ class ViFiCLIPTrainer:
         self.world_size = int(os.environ["WORLD_SIZE"])
         self.local_rank = int(os.environ["LOCAL_RANK"])
         self.is_main_process = self.rank == 0
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(backend="nccl", init_method="env://")
         torch.cuda.set_device(self.local_rank)
         dist.barrier(device_ids=[self.local_rank])
 
@@ -156,7 +154,7 @@ class ViFiCLIPTrainer:
 
         # Training state
         self.start_epoch = 0
-        self.best_metrics = ValidationMetrics()
+        self.best_metrics = None
         self.best_metric_name = self.config.TRAIN.BEST_METRIC
 
         # Handle checkpoint loading/resuming
@@ -190,7 +188,6 @@ class ViFiCLIPTrainer:
                 )
                 self.start_epoch = 0
             elif best_acc > 0:
-                self.best_metrics.accuracy = best_acc
                 self.logger.info(
                     f"Resumed from epoch {self.start_epoch} with best acc {best_acc:.2f}%"
                 )
@@ -242,8 +239,9 @@ class ViFiCLIPTrainer:
             self.train_loader.sampler.set_epoch(epoch)
 
         # Metrics
-        loss_meter = Mean()
-        time_meter = TimeMeter()
+        loss_metric = MeanMetric().to(self.device)
+        data_timer = MeanMetric(sync_on_compute=False)
+        batch_timer = MeanMetric(sync_on_compute=False)
 
         # Progress bar (only show on main process)
         pbar = tqdm(
@@ -252,11 +250,11 @@ class ViFiCLIPTrainer:
             disable=not self.is_main_process,
         )
 
-        end = time.time()
+        end = time.perf_counter()
 
         for batch_idx, batch_data in enumerate(pbar):
             # Measure data loading time
-            time_meter.data_meter.update(torch.tensor(time.time() - end))
+            data_timer.update(time.perf_counter() - end)
 
             # Prepare batch
             images = batch_data["imgs"].to(self.device, non_blocking=True)
@@ -273,7 +271,7 @@ class ViFiCLIPTrainer:
             with autocast(device_type="cuda"):
                 outputs = self.model(images)
                 loss = self.train_criterion(outputs, labels)
-                loss_meter.update(loss.cpu(), weight=len(outputs))
+                loss_metric.update(loss.item())
                 loss = loss / self.config.TRAIN.ACCUMULATION_STEPS
             # Backward pass
             self.scaler.scale(loss).backward()
@@ -299,35 +297,23 @@ class ViFiCLIPTrainer:
                     )
 
             # Update metrics
-            time_meter.batch_meter.update(torch.tensor(time.time() - end))
+            batch_timer.update(time.perf_counter() - end)
+            end = time.perf_counter()
             # Update progress bar with timing info
-            if (
-                dist.is_available()
-                and dist.is_initialized()
-                and dist.get_world_size() > 1
-            ):
-                loss_avg = sync_and_compute(loss_meter).item()
-            else:
-                loss_avg = loss_meter.compute().item()
-            data_avg = time_meter.data_time
-            batch_avg = time_meter.batch_time
             if self.is_main_process:
                 pbar.set_postfix(
                     {
-                        "loss": f"{loss_avg:.4f}",
+                        "loss": f"{loss_metric.compute().item():.4f}",
                         "lr": f"{self.optimizer.param_groups[0]['lr']:.2e}",
-                        "data_t": f"{data_avg:.2f}s",
-                        "batch_t": f"{batch_avg:.2f}s",
+                        "data_t": f"{data_timer.compute().item():.2f}s",
+                        "batch_t": f"{batch_timer.compute().item():.2f}s",
                     }
                 )
 
-        loss_meter.reset()
-        time_meter.reset()
-
-        return loss_avg
+        return loss_metric.compute().item()
 
     @torch.no_grad()
-    def validate(self, loader: Optional[DataLoader] = None) -> ValidationMetrics:
+    def validate(self, loader: Optional[DataLoader] = None) -> ValidationResults:
         """
         Validate the model with proper distributed metrics handling.
 
@@ -340,17 +326,19 @@ class ViFiCLIPTrainer:
         loader = loader or self.val_loader
 
         # Metrics using AverageMeter for proper distributed sync
-        val_meter = ValidationMeter(classes=self.class_names)
-        time_meter = TimeMeter()
+        val_metrics = get_metrics(self.num_classes).to(self.device)
+        loss_metric = MeanMetric().to(self.device)
+        data_timer = MeanMetric(sync_on_compute=False)
+        batch_timer = MeanMetric(sync_on_compute=False)
 
         # Collect predictions only on main process to save memory
 
         pbar = tqdm(loader, desc="Validation", disable=not self.is_main_process)
 
-        end = time.time()
+        end = time.perf_counter()
         for batch_data in pbar:
             # Measure data loading time
-            time_meter.data_meter.update(torch.tensor(time.time() - end))
+            data_timer.update(time.perf_counter() - end)
 
             # Prepare batch
             images = batch_data["imgs"].to(self.device, non_blocking=True)
@@ -366,36 +354,37 @@ class ViFiCLIPTrainer:
             with autocast(device_type="cuda"):
                 logits = self.model(images)
                 loss = self.val_criterion(logits, labels)
-                val_meter.update_loss(loss, n_samples=len(labels))
+                loss_metric.update(loss.item())
 
             logits = logits.view(b, n, -1).mean(dim=1)
 
             # Compute metrics
             preds = logits.argmax(dim=-1)
-            val_meter.update(preds, labels)
+            val_metrics.update(preds, labels)
 
-            time_meter.batch_meter.update(torch.tensor(time.time() - end))
-            end = time.time()
+            batch_timer.update(time.perf_counter() - end)
+            end = time.perf_counter()
 
             # Update progress bar
             if self.is_main_process:
                 pbar.set_postfix(
                     {
-                        "loss": f"{val_meter.loss:.4f}",
-                        "acc": f"{val_meter.accuracy:.3f}",
-                        "data_t": f"{time_meter.data_time:.3f}s",
-                        "batch_t": f"{time_meter.batch_time:.3f}s",
+                        "loss": f"{loss_metric.compute().item():.4f}",
+                        "data_t": f"{data_timer.compute().item():.3f}s",
+                        "batch_t": f"{batch_timer.compute().item():.3f}s",
                     }
                 )
 
         # Synchronize and compute metrics across all GPUs
-        metrics = val_meter.get_val_metrics()
-
-        val_meter.reset()
-        return metrics
+        val_results = ValidationResults(
+            classes=self.class_names,
+            loss=loss_metric.compute(),
+            **val_metrics.compute()
+        )
+        return val_results
 
     def _save_checkpoint(
-        self, epoch: int, metrics: ValidationMetrics, force_save: bool = False
+        self, epoch: int, metrics: ValidationResults, force_save: bool = False
     ):
         """
         Smart checkpoint saving strategy:
@@ -453,6 +442,11 @@ class ViFiCLIPTrainer:
         patience_counter = 0
         best_early_stop_value = float("inf") if self.best_metric_name == "loss" else 0
 
+        val_results = self.validate()
+        self.logger.info(
+            f"Pre-finetuning Validation Loss: {val_results.loss.item():.4f}\n{val_results.to_table()}"
+        )
+
         for epoch in range(self.start_epoch, self.config.TRAIN.EPOCHS):
             epoch_start = time.time()
 
@@ -464,32 +458,35 @@ class ViFiCLIPTrainer:
                 mlflow.log_metric("train_loss", train_loss, step=epoch)
 
             # Validation phase (always validate to track best model)
-            val_metrics = self.validate()
+            val_results = self.validate()
+            val_results.epoch = epoch
 
             # Log validation results
             self.logger.info(f"Epoch {epoch} - Train Loss: {train_loss:.4f}")
-            self.logger.info(f"Epoch {epoch} - Validation Loss: {val_metrics.loss:.4f}\n{val_metrics.to_table()}")
+            self.logger.info(
+                f"Epoch {epoch} - Validation Loss: {val_results.loss.item():.4f}\n{val_results.to_table()}"
+            )
 
             # MLflow logging
             if self.mlflow_enabled:
                 mlflow.log_metrics(
                     {
-                        "val_loss": val_metrics.loss,
-                        "val_accuracy": val_metrics.accuracy,
-                        "val_precision": val_metrics.precision,
-                        "val_recall": val_metrics.recall,
-                        "val_f1": val_metrics.f1,
+                        "val_loss": val_results.loss.item(),
+                        "val_accuracy": val_results.accuracy.item(),
+                        "val_precision": val_results.precision.item(),
+                        "val_recall": val_results.recall.item(),
+                        "val_f1": val_results.f1.item(),
                     },
                     step=epoch,
                 )
 
             # Save checkpoint (handles best model tracking internally)
             if self.is_main_process:
-                self._save_checkpoint(epoch, val_metrics)
+                self._save_checkpoint(epoch, val_results)
 
             # Early stopping check
             if patience > 0:
-                current_value = getattr(val_metrics, self.best_metric_name)
+                current_value = getattr(val_results, self.best_metric_name)
 
                 # Check if improved
                 if self.best_metric_name == "loss":
@@ -514,32 +511,35 @@ class ViFiCLIPTrainer:
             epoch_time = time.time() - epoch_start
             self.logger.info(
                 f"Epoch {epoch} completed in "
-                f"{datetime.timedelta(seconds=int(epoch_time))}\n"
-                + "=" * 50
+                f"{datetime.timedelta(seconds=int(epoch_time))}\n" + "=" * 50
             )
 
         # Save metrics
         if self.is_main_process:
             metrics_path = self.output_dir / "best_metrics.csv"
-            self.best_metrics.save_to_csv(metrics_path)
+            if self.best_metrics is not None:
+                self.best_metrics.save_to_csv(metrics_path)
+                self.logger.info(
+                    f"Training complete! Model with best {self.best_metric_name} (epoch={self.best_metrics.epoch}).\n"
+                    f"Loss: {self.best_metrics.loss:.4f}\n\n"
+                    f"{self.best_metrics.to_table()}"
+                )
+            else:
+                self.logger.warning("No best metrics to save.")
 
         # Save the onnx conversion of the best model
         best_path = self.output_dir / BEST_CHECKPOINT_NAME
-        self.logger.info("Loading the best model from: %s", best_path)
-        load_model_checkpoint(self.model, best_path, self.logger)
+        if best_path.exists():
+            self.logger.info("Loading the best model from: %s", best_path)
+            load_model_checkpoint(self.model, best_path, self.logger)
+        else:
+            self.logger.info("Best checkpoint not found, using current model state.")
         if self.is_main_process:
             export_onnx(self.model, self.output_dir, self.logger)
 
         # Multi-view test if configured
         if self.config.TEST.MULTI_VIEW_INFERENCE:
             self._run_multiview_test()
-
-        # Final summary
-        self.logger.info(
-            f"Training complete! Loading model with best {self.best_metric_name}.\n" 
-            f"Loss: {self.best_metrics.loss:.4f}\n\n"
-            f"{self.best_metrics.to_table()}"
-        )
 
     def _run_multiview_test(self):
         """Run enhanced multi-view testing."""

@@ -6,6 +6,7 @@ from functools import cached_property
 from pathlib import Path
 import random
 
+import numpy as np
 from torch.utils.data import Dataset
 import torchvision.transforms.v2 as T
 import torch
@@ -16,7 +17,6 @@ from torchcodec.samplers import clips_at_random_indices
 
 
 def get_train_transform(
-    num_frames: int,
     input_size: int,
     color_jitter: float,
     gray_scale: float,
@@ -25,9 +25,8 @@ def get_train_transform(
 ):
     return T.Compose(
         [
-            SampleFrames(num_frames, target_fps=30),
             T.RandomResizedCrop(
-                size=(input_size, input_size), scale=(0.66, 1.0), ratio=(1, 1)
+                size=(input_size, input_size), scale=(0.75, 1.0), ratio=(1, 1)
             ),
             T.RandomHorizontalFlip(),
             T.RandomApply(
@@ -42,14 +41,12 @@ def get_train_transform(
 
 
 def get_val_transform(
-    num_frames,
     input_size,
     norm_mean=(123.675, 116.28, 103.53),
     norm_std=(58.395, 57.12, 57.375),
 ):
     return T.Compose(
         [
-            SampleFrames(num_frames, target_fps=30),
             T.Resize(size=input_size),
             T.CenterCrop(size=(input_size, input_size)),
             T.ToDtype(torch.float),
@@ -64,12 +61,15 @@ class VideoDataset(Dataset):
         ann_file,
         data_root,
         transform,
+        num_frames: int,
         labels_file,
+        target_fps: int = 30,
     ):
         super().__init__()
         self.ann_file = ann_file
         self.data_root = Path(data_root)
 
+        self.frame_sampler = SampleFrames(num_frames, target_fps=target_fps)
         self.transform = transform
         self.video_infos = self.load_annotations()
 
@@ -84,7 +84,18 @@ class VideoDataset(Dataset):
 
     def load_annotations(self):
         """Load annotation file to get video information."""
-        return pd.read_csv(self.ann_file, sep=" ", names=["filename", "label"])
+        df = pd.read_csv(self.ann_file, sep=" ", header=None)
+
+        if len(df.columns) == 2:
+            df.columns = ["filename", "label"]
+            df["start"] = 0
+            df["end"] = np.nan
+        elif len(df.columns) == 4:
+            df.columns = ["filename", "label", "start", "end"]
+        else:
+            raise ValueError(f"Expected 2 or 4 columns, got {len(df.columns)}")
+
+        return df
 
     @cached_property
     def class_probs(self) -> torch.Tensor:
@@ -103,7 +114,14 @@ class VideoDataset(Dataset):
         """Get the sample for either training or testing given index."""
         infos = self.video_infos.iloc[idx]
 
-        out = self.transform(self.data_root / infos["filename"])
+        sampling_start = int(infos["start"])
+        sampling_end = None if np.isnan(infos["end"]) else int(infos["end"])
+        video = self.frame_sampler(
+            self.data_root / infos["filename"],
+            sampling_start=sampling_start,
+            sampling_end=sampling_end,
+        )
+        out = self.transform(video)
 
         out = {"imgs": out, "label": infos["label"].item()}
 
@@ -135,15 +153,21 @@ class SampleFrames(nn.Module):
             stride = stride_low if random.random() < prob_low else stride_high
         return stride
 
-    def forward(self, filename: str | Path):
+    def forward(
+        self,
+        filename: str | Path,
+        sampling_start: int = 0,
+        sampling_end: int | None = None,
+    ):
         decoder = VideoDecoder(filename)
         video_fps = decoder.metadata.average_fps
         stride = 1 if video_fps is None else self.get_rand_stride(video_fps)
-
         clip = clips_at_random_indices(
             decoder,
             num_frames_per_clip=self.num_frames,
             num_indices_between_frames=stride,
+            sampling_range_start=sampling_start,
+            sampling_range_end=sampling_end,
         )
 
         return clip.data.squeeze(0)

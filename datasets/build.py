@@ -14,7 +14,6 @@ def build_dataloader(config) -> tuple[VideoDataset, VideoDataset, DataLoader, Da
     global_rank = dist.get_rank()
 
     train_transform = get_train_transform(
-        num_frames=config.DATA.NUM_FRAMES,
         input_size=config.DATA.INPUT_SIZE,
         color_jitter=config.AUG.COLOR_JITTER,
         gray_scale=config.AUG.GRAY_SCALE,
@@ -25,6 +24,8 @@ def build_dataloader(config) -> tuple[VideoDataset, VideoDataset, DataLoader, Da
         data_root=config.DATA.ROOT,
         labels_file=config.DATA.LABEL_LIST,
         transform=train_transform,
+        num_frames=config.DATA.NUM_FRAMES,
+        target_fps=30,
     )
     sampler_train = torch.utils.data.DistributedSampler(
         train_data, num_replicas=world_size, rank=global_rank, shuffle=True
@@ -40,7 +41,6 @@ def build_dataloader(config) -> tuple[VideoDataset, VideoDataset, DataLoader, Da
     )
 
     val_transform = get_val_transform(
-        num_frames=config.DATA.NUM_FRAMES,
         input_size=config.DATA.INPUT_SIZE,
     )
     val_data = VideoDataset(
@@ -48,6 +48,8 @@ def build_dataloader(config) -> tuple[VideoDataset, VideoDataset, DataLoader, Da
         data_root=config.DATA.ROOT,
         labels_file=config.DATA.LABEL_LIST,
         transform=val_transform,
+        num_frames=config.DATA.NUM_FRAMES,
+        target_fps=30,
     )
     sampler_val = torch.utils.data.DistributedSampler(
         val_data, num_replicas=world_size, rank=global_rank, shuffle=False
