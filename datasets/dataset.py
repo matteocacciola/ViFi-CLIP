@@ -25,15 +25,16 @@ def get_train_transform(
 ):
     return T.Compose(
         [
+            T.TrivialAugmentWide(),  # Using this preprocessing improves the performance
             T.RandomResizedCrop(
-                size=(input_size, input_size), scale=(0.75, 1.0), ratio=(1, 1)
+                size=(input_size, input_size), scale=(0.9, 1.0), ratio=(1, 1)
             ),
-            T.RandomHorizontalFlip(),
-            T.RandomApply(
-                [T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
-                p=color_jitter,
-            ),
-            T.RandomGrayscale(p=gray_scale),
+            # T.RandomHorizontalFlip(),
+            # T.RandomApply(
+            #     [T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
+            #     p=color_jitter,
+            # ),
+            # T.RandomGrayscale(p=gray_scale),
             T.ToDtype(torch.float),
             T.Normalize(mean=norm_mean, std=norm_std),
         ]

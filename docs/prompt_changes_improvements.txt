@@ -1,0 +1,20 @@
+A change in the starting prompts improves the baseline results:
+
+
+                          accuracy  precision  recall     f1
+class                                                       
+accident_stopped_vehicle    0.3810     0.4211  0.3810 0.4000
+fire                        0.7143     1.0000  0.7143 0.8333
+fog                         1.0000     1.0000  1.0000 1.0000
+no_event                    0.0000     0.0000  0.0000 0.0000
+traffic_jam                 0.9767     0.4421  0.9767 0.6087
+AVG (macro)                 0.6144     0.5726  0.6144 0.5684
+
+                                                      accuracy  precision  recall     f1
+class                                                                                   
+a traffic accident with stalled vehicles                0.2857     1.0000  0.2857 0.4444
+vehicle fire and smoke on the road                      1.0000     1.0000  1.0000 1.0000
+presence of fog with reduced visibility                 1.0000     1.0000  1.0000 1.0000
+light traffic with vehicles spaced apart on the road    0.7500     0.4500  0.7500 0.5625
+dense slow traffic with vehicles close together         0.1628     0.2692  0.1628 0.2029
+AVG (macro)                                             0.6397     0.7438  0.6397 0.6420

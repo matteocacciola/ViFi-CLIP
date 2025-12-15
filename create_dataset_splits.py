@@ -1,9 +1,11 @@
 import argparse
 import csv
 from itertools import chain
+import math
 from pathlib import Path
 import random
 from collections import defaultdict
+from typing import Final
 
 from torchcodec.decoders import VideoDecoder
 
@@ -124,6 +126,13 @@ def check_for_spaces(dataset):
         print("   Example: 'my video.mp4' → 'my_video.mp4'\n")
 
 
+def stochastic_round(x : float, rng : random.Random | None = None) -> int:
+    floor = math.floor(x)
+    frac = x - floor
+    rnd = rng.random() if rng is not None else random.random()
+    return floor + (rnd < frac)
+
+
 def main():
     args = parse_args()
 
@@ -169,12 +178,11 @@ def main():
         )
 
     video_chunks: dict[Path, list[tuple[int, int | None]]] = {}
-    if chunking_enabled:
-        print("📦 Computing chunks...")
-        for class_name in dataset:
-            for video in dataset[class_name]:
-                total_frames = get_frame_count(args.dataset_dir / video)
-                video_chunks[video] = get_chunks(total_frames, args.chunk_size)
+    print("📦 Computing chunks...")
+    for class_name in dataset:
+        for video in dataset[class_name]:
+            total_frames = get_frame_count(args.dataset_dir / video)
+            video_chunks[video] = get_chunks(total_frames, args.chunk_size)
 
     class_mapping = {name: idx for idx, name in enumerate(sorted(dataset.keys()))}
 
@@ -182,43 +190,45 @@ def main():
     print("🎯 Train/validation split")
     train_dataset = defaultdict(list)
     val_dataset = defaultdict(list)
+    
+    
     for class_name in class_mapping.keys():
         videos = dataset[class_name]
+        random.shuffle(videos)  # Shuffle to break ties
+        # Stratify by video length
+        videos = sorted(videos, key=lambda v: len(video_chunks[v]))
+        
+        bin_size = round(max(5, len(videos) / math.sqrt(len(videos))))
+        total_seen = 0
+        total_train = 0
+        for i in range(0, len(videos), bin_size):
+            bin_videos = videos[i : i + bin_size]
+
+            bin_n = len(bin_videos)
+            total_seen += bin_n
+            ideal_total_train = args.train_ratio * total_seen
+            delta = ideal_total_train - total_train
+            delta = max(0, min(bin_n, delta))
+
+            take_train = stochastic_round(delta)
+            random.shuffle(bin_videos)
+            train_dataset[class_name] += bin_videos[:take_train]
+            val_dataset[class_name] += bin_videos[take_train:]
+
+            total_train += take_train
+        
+        # Ensure at least one video in val
+        if not val_dataset[class_name] and len(train_dataset[class_name]) > 1:
+            moved = train_dataset[class_name].pop()
+            val_dataset[class_name].append(moved)
         
         if chunking_enabled:
-            # Sort by chunk count descending, then greedily assign to smaller set
-            videos_sorted = sorted(videos, key=lambda v: len(video_chunks[v]), reverse=True)
-            train_chunks_count = 0
-            val_chunks_count = 0
-
-            for video in videos_sorted:
-                chunk_count = len(video_chunks[video])
-                total = train_chunks_count + val_chunks_count + chunk_count
-                
-                # Assign to whichever set is further below target ratio
-                current_train_ratio = train_chunks_count / total
-                if current_train_ratio < args.train_ratio:
-                    train_dataset[class_name].append(video)
-                    train_chunks_count += chunk_count
-                else:
-                    val_dataset[class_name].append(video)
-                    val_chunks_count += chunk_count
-            
-            # Ensure at least one video in val
-            if not val_dataset[class_name] and len(train_dataset[class_name]) > 1:
-                moved = train_dataset[class_name].pop()
-                val_dataset[class_name].append(moved)
-                train_chunks_count -= len(video_chunks[moved])
-                val_chunks_count += len(video_chunks[moved])
-            
+            train_chunks_count = sum(len(video_chunks[v]) for v in train_dataset[class_name])
+            val_chunks_count = sum(len(video_chunks[v]) for v in val_dataset[class_name])
             print(
-                f"   ➡️  {class_name}: Train={len(train_dataset[class_name])} ({train_chunks_count} chunks), Val={len(val_dataset[class_name])} ({val_chunks_count} chunks)"
-            )
+                    f"   ➡️  {class_name}: Train={len(train_dataset[class_name])} ({train_chunks_count} chunks), Val={len(val_dataset[class_name])} ({val_chunks_count} chunks)"
+                )
         else:
-            random.shuffle(videos)
-            train_count = min(round(len(videos) * args.train_ratio), len(videos) - 1)
-            train_dataset[class_name] = videos[:train_count]
-            val_dataset[class_name] = videos[train_count:]
             print(
                 f"   ➡️  {class_name}: Train={len(train_dataset[class_name])}, Val={len(val_dataset[class_name])}"
             )
