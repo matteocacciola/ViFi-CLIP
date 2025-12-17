@@ -20,6 +20,7 @@ import torch
 from torch.export import Dim
 import onnx
 from onnxconverter_common.auto_mixed_precision import auto_convert_mixed_precision
+from onnxconverter_common.float16 import convert_float_to_float16
 
 import clip
 
@@ -186,7 +187,8 @@ def save_checkpoint(
 
 @torch.inference_mode()
 def export_onnx(ddp_model: DDP, working_dir: Path, logger: Logger):
-    model = ddp_model.module.eval()
+    model = ddp_model.module
+    model.eval()
     working_dir = working_dir / "onnx"
     working_dir.mkdir(parents=True, exist_ok=True)
     model_path = working_dir / "model.onnx"
@@ -204,16 +206,20 @@ def export_onnx(ddp_model: DDP, working_dir: Path, logger: Logger):
         ],
         dynamo=True,
     )
-
+    logger.info("ONNX: exported fp32 version ✅")
     onnx_model = onnx.load(model_path)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)  # Suppress UserWarnings
-        model_fp16 = auto_convert_mixed_precision(
+        # model_fp16 = auto_convert_mixed_precision(
+        #     onnx_model,
+        #     {"video": input[0].numpy(force=True)},
+        #     rtol=0.01,
+        #     atol=0.001,
+        #     keep_io_types=True,
+        # )
+        model_fp16 = convert_float_to_float16(
             onnx_model,
-            {"video": input[0].numpy(force=True)},
-            rtol=0.01,
-            atol=0.001,
             keep_io_types=True,
         )
 
@@ -224,6 +230,7 @@ def export_onnx(ddp_model: DDP, working_dir: Path, logger: Logger):
         save_as_external_data=True,
         location=f"{model_fp16_path.name}.data",
     )
+    logger.info("ONNX: exported fp16 version ✅")
     logger.info(f"ONNX models saved in {model_path.parent}")
 
 

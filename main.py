@@ -402,7 +402,7 @@ class ViFiCLIPTrainer:
             )
 
         # Determine if we should save a regular checkpoint
-        is_intermediat_save = force_save or epoch % self.config.SAVE_FREQ == 0
+        is_intermediat_save = force_save or (epoch + 1) % self.config.SAVE_FREQ == 0
 
         # Save checkpoint (main process only)
         save_path = self.output_dir / "last.pth"

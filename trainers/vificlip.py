@@ -1,7 +1,8 @@
 from logging import Logger
 
 import torch
-import torch.nn as nn
+from torch import nn
+import torch.nn.functional as F
 
 from clip import clip
 
@@ -164,6 +165,11 @@ class ViFiCLIP(nn.Module):
         self.text_encoder = TextEncoder(clip_model)
         self.logit_scale = clip_model.logit_scale
 
+
+        dropout_rate = cfg.TRAIN.get("DROPOUT_RATE", 0.0) 
+        logger.info(f"Adding Dropout with rate: {dropout_rate}")
+        self.dropout = nn.Dropout(dropout_rate)
+
     def forward(self, image):
         logit_scale = self.logit_scale.exp()
         prompts = self.prompt_learner()
@@ -177,6 +183,8 @@ class ViFiCLIP(nn.Module):
         image_features = self.image_encoder(image)
         # Now again attach the batch dimensions
         image_features = image_features.view(b, t, -1)  # [B, T, 512]
+        # Apply Dropout
+        image_features = self.dropout(image_features)
         # Now take the mean along the temporal direction
         image_features = image_features.mean(dim=1, keepdim=False)  # image features are now ready
 

@@ -46,6 +46,8 @@ def build_optimizer(config, model):
         weight_decay=config.TRAIN.WEIGHT_DECAY,
         betas=(0.9, 0.98),
         eps=1e-8,
+        amsgrad=config.TRAIN.AMSGRAD,
+        fused=True,
     )
 
     return optimizer

@@ -1,6 +1,6 @@
 id,name
-0,accident_stopped_vehicle
-1,fire
-2,fog
-3,no_event
-4,traffic_jam
+0,car accident or stalled vehicles in the middle of the road
+1,vehicle fire and smoke on the road
+2,presence of fog with reduced visibility
+3,sparse traffic with fast vehicles spaced apart on the road
+4,dense traffic with slow vehicles close together on the road
