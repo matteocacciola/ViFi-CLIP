@@ -5,6 +5,9 @@ name = "ViFi-CLIP"
 platforms = ["linux-64"]
 version = "0.1.0"
 
+[tasks]
+export_to_onnx = "python export_to_onnx.py"
+
 [tasks.train]
 args = [{ "arg" = "config", "default" = "./configs/dangers_5_with_freeze.yml" }]
 cmd = "torchrun --standalone --nproc-per-node='auto' main.py --mlflow --config {{ config }}"

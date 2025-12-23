@@ -313,7 +313,7 @@ class ViFiCLIPTrainer:
         return loss_metric.compute().item()
 
     @torch.no_grad()
-    def validate(self, loader: Optional[DataLoader] = None) -> ValidationResults:
+    def validate(self, loader: Optional[DataLoader] = None, epoch : int = -1) -> ValidationResults:
         """
         Validate the model with proper distributed metrics handling.
 
@@ -379,12 +379,13 @@ class ViFiCLIPTrainer:
         val_results = ValidationResults(
             classes=self.class_names,
             loss=loss_metric.compute(),
-            **val_metrics.compute()
+            **val_metrics.compute(),
+            epoch=epoch,
         )
         return val_results
 
     def _save_checkpoint(
-        self, epoch: int, metrics: ValidationResults, force_save: bool = False
+        self, metrics: ValidationResults, force_save: bool = False
     ):
         """
         Smart checkpoint saving strategy:
@@ -402,13 +403,13 @@ class ViFiCLIPTrainer:
             )
 
         # Determine if we should save a regular checkpoint
-        is_intermediat_save = force_save or (epoch + 1) % self.config.SAVE_FREQ == 0
+        is_intermediat_save = force_save or (max(0, metrics.epoch) + 1) % self.config.SAVE_FREQ == 0
 
         # Save checkpoint (main process only)
         save_path = self.output_dir / "last.pth"
         save_checkpoint(
             self.config,
-            epoch,
+            metrics.epoch,
             self.model,
             metrics.accuracy,
             self.optimizer,
@@ -419,7 +420,7 @@ class ViFiCLIPTrainer:
             best_path = self.output_dir / BEST_CHECKPOINT_NAME
             shutil.copy(save_path, best_path)
         if is_intermediat_save:
-            intermediate_path = self.output_dir / f"epoch_{epoch}.pth"
+            intermediate_path = self.output_dir / f"epoch_{metrics.epoch}.pth"
             shutil.copy(save_path, intermediate_path)
 
     def train(self):
@@ -442,10 +443,12 @@ class ViFiCLIPTrainer:
         patience_counter = 0
         best_early_stop_value = float("inf") if self.best_metric_name == "loss" else 0
 
-        val_results = self.validate()
+        val_results = self.validate(epoch=-1)
         self.logger.info(
             f"Pre-finetuning Validation Loss: {val_results.loss.item():.4f}\n{val_results.to_table()}"
         )
+        if self.is_main_process:
+            self._save_checkpoint(val_results)
 
         for epoch in range(self.start_epoch, self.config.TRAIN.EPOCHS):
             epoch_start = time.time()
@@ -458,8 +461,7 @@ class ViFiCLIPTrainer:
                 mlflow.log_metric("train_loss", train_loss, step=epoch)
 
             # Validation phase (always validate to track best model)
-            val_results = self.validate()
-            val_results.epoch = epoch
+            val_results = self.validate(epoch=epoch)
 
             # Log validation results
             self.logger.info(f"Epoch {epoch} - Train Loss: {train_loss:.4f}")
@@ -482,7 +484,7 @@ class ViFiCLIPTrainer:
 
             # Save checkpoint (handles best model tracking internally)
             if self.is_main_process:
-                self._save_checkpoint(epoch, val_results)
+                self._save_checkpoint(val_results)
 
             # Early stopping check
             if patience > 0:

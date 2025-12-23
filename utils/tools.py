@@ -186,8 +186,9 @@ def save_checkpoint(
 
 
 @torch.inference_mode()
-def export_onnx(ddp_model: DDP, working_dir: Path, logger: Logger):
-    model = ddp_model.module
+def export_onnx(model: DDP | nn.Module, working_dir: Path, logger: Logger):
+    if isinstance(model, DDP):
+        model = model.module
     model.eval()
     working_dir = working_dir / "onnx"
     working_dir.mkdir(parents=True, exist_ok=True)
@@ -211,15 +212,11 @@ def export_onnx(ddp_model: DDP, working_dir: Path, logger: Logger):
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)  # Suppress UserWarnings
-        # model_fp16 = auto_convert_mixed_precision(
-        #     onnx_model,
-        #     {"video": input[0].numpy(force=True)},
-        #     rtol=0.01,
-        #     atol=0.001,
-        #     keep_io_types=True,
-        # )
-        model_fp16 = convert_float_to_float16(
+        model_fp16 = auto_convert_mixed_precision(
             onnx_model,
+            {"video": input[0].numpy(force=True)},
+            rtol=0.05,
+            atol=0.005,
             keep_io_types=True,
         )
 
